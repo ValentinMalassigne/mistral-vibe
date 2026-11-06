@@ -16,11 +16,13 @@ use self::completion::{AgentCompletionPlan, AgentCompletionRequest, plan_agent_c
 use self::lifecycle_hooks::{
     HookResolution, resolve_failed_lifecycle_hook, resolve_lifecycle_hook,
 };
+use crate::core::features::agent_compaction::{self, Pending, Refusal};
 use crate::core::features::compaction::{
     AgentRefusal, CompactionAttemptResolution, CompactionResolution, CompactionStartResolution,
-    PendingCompaction, correct_refused_agent_request, finish_summary_request, is_context_overflow,
-    model_input_reaches_compaction_threshold, record_reply_size, start_automatic_compaction,
-    start_manual_compaction as start_manual_compaction_request,
+    PendingCompaction, RequestMeasurements, correct_refused_agent_request,
+    corrected_request_tokens, finish_summary_request, is_context_overflow,
+    model_input_reaches_compaction_threshold, record_reply_size, start_agent_compaction,
+    start_automatic_compaction, start_manual_compaction as start_manual_compaction_request,
 };
 use crate::core::features::notifications::notification_messages;
 use crate::core::features::permissions::{ApprovalFailureReason, ApprovalOutcome};
@@ -35,13 +37,13 @@ use crate::core::step_protocol::FilesystemResult;
 use crate::core::step_protocol::{
     ActionAbandonedCause, CandidateDiscardCause, Observation, Outcome, TurnStopReason,
 };
+use crate::core::tools::execution::ToolBatch;
 use crate::core::tools::execution::batch::{
     ToolBatchResolution, ToolBatchTransition, fail_tool_batch_hook, finish_tool_batch_action,
     finish_tool_batch_approval, finish_tool_batch_filesystem_write, finish_tool_batch_hook,
 };
 use crate::core::wire::completion::CompletionResult;
-use crate::core::wire::content::ContentBlock;
-use crate::core::wire::content::validate_non_empty_content;
+use crate::core::wire::content::{ContentBlock, text_content, validate_non_empty_content};
 use crate::core::wire::message::{Message, StoredMessage};
 use crate::core::wire::tool::{ProtocolError, ToolResult};
 use crate::core::wire::user_message::UserMessageMode;
@@ -250,6 +252,17 @@ fn apply_compaction_resolution(
             // Compaction just ran, so resume with an agent completion without
             // checking the automatic threshold again.
             state.mark_model_input_ready()?;
+            if let Some(pending) = state.pending_agent_compaction.take() {
+                inject_handoff_note(state, &pending.handoff_note)?;
+            }
+            // The size the compaction left, so the next request has to add
+            // real context before another one is worth its cost.
+            state.agent_compaction_baseline_tokens = Some(corrected_request_tokens(
+                &state.config.settings,
+                state.resolved_tools.top_level_tools(),
+                state.context.messages(),
+                RequestMeasurements::of(state),
+            )?);
             let action = continue_after_compaction(state)?;
             Ok(outcome.after(outcome_for_action(state, action)?))
         }
@@ -263,6 +276,9 @@ fn apply_compaction_resolution(
             turn_id,
             error,
         } => {
+            // The compaction did not happen: the request that asked for it
+            // dies with the Turn.
+            state.pending_agent_compaction = None;
             outcome.observe(Observation::TurnFailed {
                 turn_id,
                 error: error.clone(),
@@ -356,9 +372,114 @@ fn finish_pending_tool(
     else {
         return Err(invalid_state(state));
     };
+    let result = record_agent_compaction(state, &batch, &call_id, result)?;
     let tools = state.tool_context()?;
     let resolution = finish_tool_batch_action(tools, batch, &action_id, result, determinism)?;
     apply_tool_batch_transition(state, resolution)
+}
+
+/// Records the compaction a successful `request_compaction` asks for.
+///
+/// The guards run here, when the result arrives, and not at the end of the
+/// Turn: a refusal has to reach the model while it can still do something
+/// about it, inside the Turn it wanted compacted. A refusal therefore replaces
+/// the result with a failure the model reads immediately.
+fn record_agent_compaction(
+    state: &mut HarnessState,
+    batch: &ToolBatch,
+    call_id: &str,
+    result: ToolResult,
+) -> Result<ToolResult, CoreError> {
+    let Some(call) = batch.call(call_id) else {
+        return Ok(result);
+    };
+    if call.name != agent_compaction::TOOL_NAME {
+        return Ok(result);
+    }
+    let ToolResult::Success {
+        structured_content, ..
+    } = &result
+    else {
+        // The Runtime refused to read the note: the model already has the
+        // reason it needs.
+        return Ok(result);
+    };
+    let (note, shortened) = agent_compaction::read_reply(structured_content)?;
+    // The same size the automatic trigger reads, so the two agree on what fits.
+    let estimated = corrected_request_tokens(
+        &state.config.settings,
+        state.resolved_tools.top_level_tools(),
+        state.context.messages(),
+        RequestMeasurements::of(state),
+    )?;
+    if let Err(refusal) = admit_agent_compaction(state, estimated) {
+        return Ok(agent_compaction_refused(refusal));
+    }
+    state.pending_agent_compaction = Some(Pending {
+        handoff_note: note,
+        extra_instructions: agent_compaction::extra_instructions(&call.arguments),
+    });
+    if shortened {
+        return Ok(agent_compaction_truncated(result));
+    }
+    Ok(result)
+}
+
+/// Whether the Session gains anything from compacting now.
+fn admit_agent_compaction(state: &HarnessState, estimated: u64) -> Result<(), Refusal> {
+    if state.pending_agent_compaction.is_some()
+        || matches!(state.turn, TurnState::Compacting { .. })
+    {
+        return Err(Refusal::AlreadyPending);
+    }
+    let done = state.agent_compactions_done;
+    if done >= agent_compaction::MAX_PER_SESSION {
+        return Err(Refusal::QuotaReached {
+            done,
+            max: agent_compaction::MAX_PER_SESSION,
+        });
+    }
+    if estimated < agent_compaction::MIN_INPUT_TOKENS {
+        return Err(Refusal::BelowFloor {
+            estimated,
+            floor: agent_compaction::MIN_INPUT_TOKENS,
+        });
+    }
+    if let Some(baseline) = state.agent_compaction_baseline_tokens {
+        let grown = estimated.saturating_sub(baseline);
+        if grown < agent_compaction::MIN_GROWTH_TOKENS {
+            return Err(Refusal::InsufficientGrowth {
+                grown,
+                required: agent_compaction::MIN_GROWTH_TOKENS,
+            });
+        }
+    }
+    Ok(())
+}
+
+fn agent_compaction_refused(refusal: Refusal) -> ToolResult {
+    ToolResult::Failure {
+        content: Vec::new(),
+        structured_content: crate::core::wire::tool::StructuredContent::Absent,
+        meta: None,
+        error: ProtocolError {
+            code: "tool_failed".to_string(),
+            message: refusal.message(),
+            retryable: false,
+            details: serde_json::Value::Null,
+        },
+    }
+}
+
+/// Tells the model that the note it will get back is shorter than the one it
+/// wrote, so it can write a shorter one next time.
+fn agent_compaction_truncated(mut result: ToolResult) -> ToolResult {
+    if let ToolResult::Success { content, .. } = &mut result {
+        content.extend(text_content(
+            "The handoff note exceeded the bytes Core keeps and was shortened; write a shorter one if the missing part matters.",
+        ));
+    }
+    result
 }
 
 fn finish_pending_filesystem(
@@ -440,6 +561,20 @@ fn start_manual_compaction(
             apply_compaction_resolution(state, *resolution)
         }
     }
+}
+
+/// Re-injects the note the model wrote before compacting, right after the
+/// summary: the compaction is then non-destructive, the plan survives it, and
+/// the resumed Turn needs no human nudge to continue.
+fn inject_handoff_note(state: &mut HarnessState, note: &str) -> Result<(), CoreError> {
+    let text = format!(
+        "Context compacted. The handoff note you wrote before the compaction follows.\n\n{note}"
+    );
+    let message = StoredMessage::injected(content_to_user_message(text_content(text))?);
+    // The resumed Turn owns the current group, so the note sits inside it,
+    // between the summary and the next request.
+    state.context.push_in_current_turn(message);
+    Ok(())
 }
 
 /// Installs an automatic compaction started inside the active turn.
@@ -719,6 +854,28 @@ fn apply_tool_batch_transition(
             state
                 .context
                 .extend_current_turn(messages.into_iter().map(StoredMessage::visible));
+            if state.pending_agent_compaction.is_some() {
+                // The model asked to compact and has nothing left to call:
+                // honour it now instead of asking for another completion. The
+                // request is dropped here, so a failed compaction does not
+                // leave a scheduling that never runs.
+                let (turn_id, iterations, extra_instructions) = {
+                    let active = state.require_active()?;
+                    let pending = state
+                        .pending_agent_compaction
+                        .as_ref()
+                        .expect("the request was checked to exist");
+                    (
+                        active.turn_id.clone(),
+                        active.iterations,
+                        pending.extra_instructions.clone(),
+                    )
+                };
+                let start =
+                    start_agent_compaction(state, &turn_id, iterations, &extra_instructions)?;
+                state.agent_compactions_done += 1;
+                return Ok(outcome.after(apply_in_turn_compaction_start(state, start)?));
+            }
             state.mark_model_input_ready()?;
             let max_iterations = state.config.settings.turn.max_iterations;
             let iterations = state.require_active()?.iterations;

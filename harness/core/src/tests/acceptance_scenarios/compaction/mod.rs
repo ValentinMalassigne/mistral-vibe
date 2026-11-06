@@ -8,6 +8,7 @@ use crate::core::testing::{
 };
 use crate::core::{InputModality, Message};
 
+mod agent;
 mod check;
 mod cut_off;
 mod image;

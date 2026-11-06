@@ -1,6 +1,7 @@
 use crate::core::capabilities::HookBindingIndex;
 use crate::core::config::HarnessConfig;
 use crate::core::error::CoreError;
+use crate::core::features::agent_compaction;
 use crate::core::features::compaction::{
     EstimateCorrection, ExactRequestTokens, PendingCompaction,
 };
@@ -70,6 +71,14 @@ pub(crate) struct HarnessState {
     /// does not live inside [`TurnState`].
     pub last_finished_turn_id: Option<String>,
     pub notifications: NotificationState,
+    /// The compaction the model asked for in the running Turn, consumed when
+    /// the Turn resumes. Transient, like the rest of the compaction state: a
+    /// restored Session does not resume the compaction it was waiting for.
+    pub pending_agent_compaction: Option<agent_compaction::Pending>,
+    /// How many times the model compacted this Session, and the size the last
+    /// one left, so a run of requests cannot trade the conversation away.
+    pub agent_compactions_done: u32,
+    pub agent_compaction_baseline_tokens: Option<u64>,
     pub(crate) tool_catalog: ToolCatalogLedger,
 }
 

@@ -7,7 +7,12 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::core::error::CoreError;
 use crate::core::step_protocol::ToolDefinition;
+use crate::core::wire::tool::StructuredContent;
+
+/// The name the model calls, and the name Core routes.
+pub(crate) const TOOL_NAME: &str = "request_compaction";
 
 /// Below this input size, compacting frees less than the resume re-sends: the
 /// summary request and the continuation both re-read the conversation.
@@ -45,7 +50,7 @@ impl Mode {
 
 pub(crate) fn tool(description: &str) -> ToolDefinition {
     ToolDefinition {
-        name: "request_compaction".to_string(),
+        name: TOOL_NAME.to_string(),
         description: description.to_owned(),
         parameters: input_schema(),
     }
@@ -78,4 +83,103 @@ pub(crate) fn output_schema() -> Value {
         },
         "required": ["handoff_note", "handoff_bytes", "truncated"],
     })
+}
+
+/// What the Runtime answers: the note it read, how many bytes of it, and
+/// whether the file held more than the read returned.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandoffReply {
+    handoff_note: String,
+    handoff_bytes: u64,
+    truncated: bool,
+}
+
+/// The compaction the model asked for, kept on the state until the Turn ends
+/// and consumed when the Turn resumes.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Pending {
+    pub handoff_note: String,
+    pub extra_instructions: String,
+}
+
+/// Why a request was refused. Each message tells the model what to do instead:
+/// it reads the refusal inside the Turn it wanted compacted.
+pub(crate) enum Refusal {
+    BelowFloor { estimated: u64, floor: u64 },
+    InsufficientGrowth { grown: u64, required: u64 },
+    QuotaReached { done: u32, max: u32 },
+    AlreadyPending,
+}
+
+impl Refusal {
+    pub(crate) fn message(&self) -> String {
+        match self {
+            Self::BelowFloor { estimated, floor } => format!(
+                "Nothing was compacted: this request holds about {estimated} input tokens, \
+                 below the {floor} at which a compaction frees more context than it costs. \
+                 Keep working and ask again once the conversation is longer."
+            ),
+            Self::InsufficientGrowth { grown, required } => format!(
+                "Nothing was compacted: only {grown} tokens were added since the last \
+                 compaction, below the {required} that make another one worth its cost. \
+                 Keep working with the summary you have."
+            ),
+            Self::QuotaReached { done, max } => format!(
+                "Nothing was compacted: this session already compacted {done} times, its \
+                 limit of {max}. Finish with the context you have."
+            ),
+            Self::AlreadyPending => "Nothing was compacted: this Turn already has a \
+                 compaction scheduled. Do not call this tool again; end your Turn."
+                .to_string(),
+        }
+    }
+}
+
+/// The note to re-inject, and whether it is shorter than what the model wrote.
+///
+/// A Runtime answers another shape only if it is another Runtime, so a
+/// non-conforming reply is an error rather than a silent empty note.
+pub(crate) fn read_reply(
+    structured_content: &StructuredContent,
+) -> Result<(String, bool), CoreError> {
+    let value = structured_content.as_value().ok_or_else(|| {
+        CoreError::invalid_command("request_compaction answered without a handoff note")
+    })?;
+    let reply: HandoffReply = serde_json::from_value(value.clone()).map_err(|error| {
+        CoreError::invalid_command(format!(
+            "request_compaction answered an unexpected shape: {error}"
+        ))
+    })?;
+    if reply.handoff_note.trim().is_empty() {
+        return Err(CoreError::invalid_command(
+            "request_compaction answered an empty handoff note",
+        ));
+    }
+    let cut = reply.truncated || reply.handoff_bytes > MAX_HANDOFF_BYTES;
+    let (note, shortened) = bounded(&reply.handoff_note);
+    Ok((note, cut || shortened))
+}
+
+/// The request's own instructions, which shape the summary prompt.
+pub(crate) fn extra_instructions(arguments: &Value) -> String {
+    arguments
+        .get("extra_instructions")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Bounds the note Core re-injects after the summary, on a character boundary
+/// so the model reads valid UTF-8.
+fn bounded(note: &str) -> (String, bool) {
+    let limit = MAX_HANDOFF_BYTES as usize;
+    if note.len() <= limit {
+        return (note.to_string(), false);
+    }
+    let mut end = limit;
+    while end > 0 && !note.is_char_boundary(end) {
+        end -= 1;
+    }
+    (note[..end].to_string(), true)
 }

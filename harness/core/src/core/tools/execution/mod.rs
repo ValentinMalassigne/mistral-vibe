@@ -53,6 +53,14 @@ pub(crate) struct ToolBatch {
 }
 
 impl ToolBatch {
+    /// The call this batch issued under `call_id`, if it issued one.
+    pub(crate) fn call(&self, call_id: &str) -> Option<&ToolCall> {
+        self.executions
+            .iter()
+            .map(|execution| &execution.call)
+            .find(|call| call.id == call_id)
+    }
+
     /// The results of the calls that already finished, in call order. Core commits them to
     /// the conversation only when every call in the batch has finished.
     pub(crate) fn completed_messages(&self) -> Vec<&Message> {

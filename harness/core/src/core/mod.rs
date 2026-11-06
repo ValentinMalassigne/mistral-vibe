@@ -167,6 +167,9 @@ pub(crate) fn initial_state_with_history(
         turn: TurnState::Idle,
         last_finished_turn_id: None,
         notifications: NotificationState::default(),
+        pending_agent_compaction: None,
+        agent_compactions_done: 0,
+        agent_compaction_baseline_tokens: None,
         tool_catalog: Default::default(),
     })
 }

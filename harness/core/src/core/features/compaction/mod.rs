@@ -61,7 +61,8 @@ pub(in crate::core) use execution::{
 };
 pub(in crate::core) use orchestration::{
     AgentRefusal, correct_refused_agent_request, finish_summary_request,
-    next_turn_compaction_unfit, start_automatic_compaction, start_manual_compaction,
+    next_turn_compaction_unfit, start_agent_compaction, start_automatic_compaction,
+    start_manual_compaction,
 };
 pub(in crate::core) use overflow::{
     EstimateCorrection, ExactRequestTokens, RequestRevision, is_context_overflow,
