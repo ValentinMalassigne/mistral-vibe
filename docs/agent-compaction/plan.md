@@ -656,3 +656,25 @@ About 1,000 lines in total, half of it tests. 10 Rust files, 6 Python files.
 | Oversized note | byte bound, truncation reported to the model (`truncated: true`) |
 | Model calling the tool without a handoff | required parameter + actionable refusal, the model corrects itself |
 | Transient state lost on session resume | accepted: compaction state is not checkpointed either; so is the tool result |
+
+## 11. Corrections found while implementing
+
+The plan was written by reading the code. Implementing it proved nine points wrong or
+incomplete. They are recorded here rather than edited into the sections above, so the plan
+stays a record of what was known before coding.
+
+| Section | What the plan said | What the code required |
+|---|---|---|
+| §3.3 | `checkpoint/v1/schema/program.rs` needs no change | `CheckpointRuntimeBuiltinToolName::capture` matches exhaustively over `RuntimeBuiltinToolName`, so a new tool forces a schema entry: a pending call must be checkpointable like any other |
+| §3.6 | `InTurn` carries the trigger | The checkpoint had to record it too: without it a restored agent compaction is relabelled automatic. `AwaitingCompaction.trigger` defaults to `automatic`, so older checkpoints keep their meaning |
+| §3.1, §7 | `Settings { enabled: bool }`, `[tools.agent_compaction]` in `config.toml` | Core has no boolean toggle: activation is a tagged `Mode` enum. Harness tool settings are not user-facing, and `tools.*` already means custom tool definitions. The user chose the repository convention: `Mode` in Core, a flat `enable_agent_compaction` in the config, bounds as Core constants |
+| §4.2 | A `Tools` Pydantic model in `config/models.py` | No such model exists; the setting lives in `VibeConfigSchema` |
+| §3.7 | The baseline is `last_reported_context_tokens` taken before the compaction | Taken before, it would make every later request look like it had not grown. It is measured when the Turn resumes |
+| §3.7(d) | `push_before_next_turn` re-injects the note | The resumed Turn owns the current group, so `push_in_current_turn` puts the note between the summary and the next request |
+| §4.1 | `vibe/_agent_compaction.py` resolves the path with `_read_roots` / `_is_within` | Reading through `read_file` itself is the only way to follow a sandbox, symlinks and approvals. The runtime returns the text; Core owns `MAX_HANDOFF_BYTES` and truncates |
+| §4.1 | A dispatch arm in `vibe/_runtime.py` around line 2750 | Runtime built-ins dispatch in `vibe/_local_actions.py`; `_runtime.py` only special-cases waiting and sleeping |
+| §5.0 | `cargo nextest run` runs the harness suite | It does not compile: `harness/core/tests/` is not published, and six `include_str!` sites need it. The V1 fixtures are regenerable with `UPDATE_CHECKPOINT_FIXTURES=1`; the retired-agent ones are not |
+
+Python runtime tests live in `harness/runtimes/python/tests/`, next to the runtime they
+cover: the repository root `tests/` mirrors the app server, and the runtime ships without its
+own suite.

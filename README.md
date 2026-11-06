@@ -1043,6 +1043,13 @@ process tools. It defaults to `true`.
 `run_typescript`) away from the agent on the default runtime: the system prompt
 no longer describes them, and the agent works alone. It defaults to `true`.
 
+`enable_agent_compaction = true` gives the agent the `request_compaction` tool, so
+it can compact its own context when the plan it follows says to, instead of waiting
+for `/compact`. It writes a handoff note first; the note comes back after the summary
+and the turn continues without a prompt. It defaults to `false`, and the agent gets a
+tool error explaining why when the context is too small, grew too little since the
+last compaction, or the session reached its compaction limit.
+
 `outside_workdir = "deny"` refuses file and shell tool calls that reach outside
 the working directory and its `--add-dir` directories instead of prompting: the
 agent gets a tool error explaining that access is denied by configuration, and
