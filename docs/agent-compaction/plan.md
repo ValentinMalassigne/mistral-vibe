@@ -3,6 +3,11 @@
 Cible : `main` @ `c96a6dbb` (v3.1.0). Les numéros de ligne sont ceux de ce commit.
 Ce plan corrige la carte du code du handoff sur trois points structurants (voir §1).
 
+Règle de travail retenue pour ce fork : **on suit les conventions du repo**. Une
+fonctionnalité ajoutée s'aligne sur l'existant (défauts, nommage, structure, tests) plutôt que
+d'imposer ses propres choix. En cas de conflit réel entre ce qu'on veut et la convention, on
+le remonte et on ne tranche pas unilatéralement.
+
 ## 1. Architecture réelle (et ce que le handoff supposait de travers)
 
 ```
@@ -408,41 +413,74 @@ Chaque étape compile et passe ses tests avant la suivante.
 7. Config `vibe/` + projection UI.
 8. Acceptance tests complets.
 
-## 7. Build et usage local (objectif « mon vibe du quotidien »)
+## 7. Deux commandes côte à côte : `vibe` et `vibe-fork`
 
-Prérequis : toolchain Rust **1.97.1** (`harness/rust-toolchain.toml`) et `cargo-nextest`
-0.9.146 pour les tests. `uv` est déjà présent.
+Contrainte : `vibe` doit continuer à lancer le Vibe officiel. Le fork s'installe donc sous un
+second nom.
+
+`[project.scripts]` expose `vibe-fork = "vibe.cli.launcher:main"` — même point d'entrée,
+ajout purement additif. Le launcher est agnostique au nom : il ne lit pas `argv[0]` pour
+choisir le binaire mais le résout depuis le paquet (`launcher.py:68`), et cherche l'app-server
+comme **voisin de `sys.argv[0]` résolu** (`launcher.py:88`). Une entrée `vibe-fork` installée
+dans un venv dédié est donc autonome : elle trouve son `vibe-app-server` dans le même `bin/`.
+
+### Installation
+
+Ne **pas** utiliser `uv tool install` : il écrirait aussi `vibe` dans `~/.local/bin` et
+remplacerait l'officiel. Venv dédié, puis un seul lien symbolique :
+
+```bash
+uv venv ~/.vibe-fork/venv
+uv pip install --python ~/.vibe-fork/venv/bin/python /Users/valentin/Code/Tests/mistral-vibe-fork
+ln -sfn ~/.vibe-fork/venv/bin/vibe-fork ~/.local/bin/vibe-fork
+```
+
+`vibe` reste l'officiel, `vibe-fork` lance le fork. Après une modification Rust, relancer les
+deux premières lignes.
+
+### Développement
+
+```bash
+uv sync --all-extras
+uv run vibe     # dans le repo, sans rien installer sur le PATH
+```
 
 Le build Python (`build_backend/maturin_backend.py`) compile **les deux** binaires Rust :
 l'extension du harness (`harness/core` → `mistralai_vibe_local_harness._native`) et la TUI
-(`vibe/cli-rust` → `vibe/_bin/vibe-rs`). `cargo` absent = échec explicite
+(`vibe/cli-rust` → `vibe/_bin/vibe-rs`). Sans `cargo`, échec explicite
 (`maturin_backend.py:101`).
 
-```bash
-# développement
-uv sync --all-extras
-uv run vibe
+Build non éditable assumé : chaque changement Rust exige de toute façon une recompilation,
+autant la déclencher explicitement plutôt qu'à l'import.
 
-# installation « comme l'officiel » : vibe sur le PATH = le fork
-uv tool install --force /Users/valentin/Code/Tests/mistral-vibe-fork
-vibe
-```
+### Toolchain (installé, vérifié)
 
-(`uv tool install` prend directement le chemin du projet ; il n'y a pas de `--from` ici,
-contrairement à `uvx`.)
+| Élément | Version |
+|---|---|
+| `rustc` / `cargo` | 1.97.1 aarch64-apple-darwin, profil minimal |
+| composants | `rustfmt`, `clippy`, `llvm-tools` |
+| `cargo-nextest` | 0.9.146 (prébuilt, version épinglée par AGENTS.md) |
+| `uv` | 0.11.7 (déjà présent) |
 
-La config et la clé API restent dans `~/.vibe/config.toml`, identiques à l'installation
-officielle : rien à refaire. `uv tool install --force` remplace le `vibe` actuel de
-`~/.local/bin` ; retour arrière par `uv tool install --force mistral-vibe` (version publiée).
-Le build non-editable est préférable : chaque changement Rust exige de toute façon une
-recompilation, autant la faire au moment voulu plutôt qu'à l'import.
+Installé via `rustup` avec `--no-modify-path` : `$HOME/.cargo/bin` n'est pas dans le `PATH`
+global. Pour appeler `cargo` directement, `source "$HOME/.cargo/env"`.
 
-Activer la fonctionnalité :
+### Config partagée
+
+Les deux commandes lisent le même `~/.vibe/config.toml` : clé API, modèles et thème communs,
+rien à dupliquer.
 
 ```toml
 [tools.agent_compaction]
 enabled = true
 ```
+
+Conséquence à connaître : le Vibe officiel ne connaît pas cette section. Il ne plante pas —
+le schéma tolère les clés inconnues (`extra="ignore"`, cf. le commentaire de
+`config/models.py:107`) — mais il affiche « Config setting ignored : tools.agent_compaction »
+(`vibe_schema.py:489`). Avec `strict_config = true`, c'est en revanche une erreur de
+chargement. Si la gêne devient réelle, la sortie est un `VIBE_HOME` distinct pour le fork, à
+trancher le moment venu.
 
 ## 8. Workflow fork / upstream
 
@@ -458,6 +496,9 @@ git checkout feat/agent-compact && git rebase main
 Le diff touche ~10 fichiers Rust et ~6 Python, tous localisés. Le risque n'est pas la taille
 mais le point d'accroche `apply_tool_batch_transition` et `CompactionContinuation`, qui sont
 du code actif.
+
+L'entrée `vibe-fork` de `[project.scripts]` est une commodité **propre au fork** : à retirer
+si on ouvre une PR upstream, elle n'a de sens que pour faire cohabiter les deux commandes.
 
 ## 9. Estimation
 
