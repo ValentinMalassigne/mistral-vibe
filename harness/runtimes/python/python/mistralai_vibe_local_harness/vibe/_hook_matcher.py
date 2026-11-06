@@ -61,6 +61,7 @@ MAIN_AGENT_ALIAS = "main"
 _BUILTIN_MODEL_NAMES: dict[str, tuple[str, ...]] = {
     "self.wait": ("wait",),
     "self.sleep": ("sleep",),
+    "request_compaction": ("request_compaction",),
     "file_system.read_file": ("read_file",),
     "file_system.write_file": ("write_file",),
     "file_system.edit": ("edit",),

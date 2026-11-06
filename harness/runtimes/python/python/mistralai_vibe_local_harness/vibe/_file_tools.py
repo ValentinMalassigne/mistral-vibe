@@ -403,4 +403,31 @@ def _failed(
     )
 
 
-__all__ = ["FILE_SYSTEM", "execute_file_tool"]
+async def read_file_text(
+    path: str,
+    config: LocalRuntimeAdapterConfig,
+    *,
+    additional_read_roots: tuple[Path, ...] = (),
+    workspace_read_roots: tuple[Path, ...] = (),
+) -> ReadFileResult:
+    """Read a file under the rules of ``read_file``, for a tool that needs its text.
+
+    ``request_compaction`` reads the handoff note the model wrote. It must reach
+    the same file the model can read, through the same roots, the same symlink
+    handling and the same sandbox as ``read_file``, so it reads through the tool
+    instead of resolving a path on its own.
+    """
+    tool = FILE_TOOLS["file_system.read_file"]
+    arguments = ReadFileArgs(path=path).model_dump(mode="json")
+    raw_response = await _run_file_tool(
+        tool,
+        arguments,
+        config,
+        additional_read_roots=additional_read_roots,
+        workspace_read_roots=workspace_read_roots,
+        authorized_path=None,
+    )
+    return ReadFileResponse.model_validate(raw_response).result
+
+
+__all__ = ["FILE_SYSTEM", "execute_file_tool", "read_file_text"]

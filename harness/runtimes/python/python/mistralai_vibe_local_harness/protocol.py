@@ -32,6 +32,7 @@ type RustHookPoint = Literal[
 RustRuntimeBuiltinToolName = Literal[
     "self.wait",
     "self.sleep",
+    "request_compaction",
     "file_system.read_file",
     "file_system.write_file",
     "file_system.edit",
@@ -59,6 +60,7 @@ RustRuntimeBuiltinToolName = Literal[
 RUNTIME_BUILTIN_TOOL_NAMES: tuple[RustRuntimeBuiltinToolName, ...] = (
     "self.wait",
     "self.sleep",
+    "request_compaction",
     "file_system.read_file",
     "file_system.write_file",
     "file_system.edit",
@@ -1017,7 +1019,7 @@ class RustLLMCallAction(RustProtocolModel):
     purpose: Literal["agent", "compaction"] = "agent"
     compaction_id: str | None = None
     attempt: int | None = Field(default=None, gt=0)
-    trigger: Literal["automatic", "manual"] | None = None
+    trigger: Literal["automatic", "manual", "agent"] | None = None
     # Omitted from agent calls so transition digests recorded before the field
     # existed still match on replay.
     request: Literal["in_context", "standalone"] | None = Field(
@@ -1047,7 +1049,9 @@ class RustLLMCallAction(RustProtocolModel):
             raise ValueError(
                 "compaction LLM calls require compaction identity and attempt"
             )
-        if self.trigger == "automatic" and self.turn_id is not None:
+        # An automatic or agent compaction continues its Turn; only a manual
+        # one runs between Turns.
+        if self.trigger in {"automatic", "agent"} and self.turn_id is not None:
             return self
         if self.trigger == "manual" and self.turn_id is None:
             return self
@@ -1405,7 +1409,7 @@ class RustContextCompactedObservation(RustProtocolModel):
     action_id: str
     compaction_id: str
     attempt: int = Field(gt=0)
-    trigger: Literal["automatic", "manual"]
+    trigger: Literal["automatic", "manual", "agent"]
     summary: str = Field(min_length=1)
     usage: RustTokenUsage | None
 
@@ -1416,7 +1420,7 @@ class RustContextCompactionFailedObservation(RustProtocolModel):
     action_id: str
     compaction_id: str
     attempt: int = Field(gt=0)
-    trigger: Literal["automatic", "manual"]
+    trigger: Literal["automatic", "manual", "agent"]
     error: RustProtocolError
 
 
@@ -1490,7 +1494,7 @@ class RustIdleTurn(RustProtocolModel):
 
 class RustCompactingTurn(RustProtocolModel):
     status: Literal["compacting"] = "compacting"
-    trigger: Literal["automatic", "manual"]
+    trigger: Literal["automatic", "manual", "agent"]
 
 
 class RustRunningTurn(RustProtocolModel):

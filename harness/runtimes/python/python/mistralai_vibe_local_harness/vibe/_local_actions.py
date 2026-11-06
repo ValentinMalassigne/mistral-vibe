@@ -65,6 +65,9 @@ from mistralai_vibe_local_harness.protocol import (
     RustToolSucceededEvent,
 )
 from mistralai_vibe_local_harness.session_protocol import JsonObject
+from mistralai_vibe_local_harness.vibe._agent_compaction import (
+    execute_agent_compaction,
+)
 from mistralai_vibe_local_harness.vibe._completion import execute_completion
 from mistralai_vibe_local_harness.vibe._file_tools import execute_file_tool
 from mistralai_vibe_local_harness.vibe._hook_matcher import qualified_tool_name
@@ -758,16 +761,16 @@ class _LocalActionState:
             )
             if denial is not None:
                 return self._with_approval_note(denial, action.action_id)
+            additional_read_roots = (
+                (self._filesystem_root / "attachments",)
+                if self._filesystem_root is not None
+                else ()
+            )
             if action.call.name in {
                 "file_system.read_file",
                 "file_system.write_file",
                 "file_system.edit",
             }:
-                additional_read_roots = (
-                    (self._filesystem_root / "attachments",)
-                    if self._filesystem_root is not None
-                    else ()
-                )
                 return self._with_approval_note(
                     await execute_file_tool(
                         action,
@@ -777,6 +780,18 @@ class _LocalActionState:
                         authorized_path=self._resolved_authorized_paths.pop(
                             action.action_id, None
                         ),
+                    ),
+                    action.action_id,
+                )
+            if action.call.name == "request_compaction":
+                # Reads the handoff note under the rules of `read_file`, so the
+                # model can compact from any file it could have read.
+                return self._with_approval_note(
+                    await execute_agent_compaction(
+                        action,
+                        self._config,
+                        additional_read_roots=additional_read_roots,
+                        workspace_read_roots=self._saved_outputs.read_roots,
                     ),
                     action.action_id,
                 )
