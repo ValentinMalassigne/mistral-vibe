@@ -44,6 +44,14 @@ pub(crate) fn direct_routes(config: &HarnessConfig) -> Vec<(String, ToolTarget)>
             },
         ));
     }
+    if config.settings.tools.agent_compaction.is_enabled() {
+        routes.push((
+            "request_compaction".to_string(),
+            ToolTarget::RuntimeBuiltin {
+                name: crate::core::tools::external::RuntimeBuiltinToolName::AgentCompactionRequest,
+            },
+        ));
+    }
     if !config.settings.tools.skills.is_disabled() {
         let skill_name = skills::ToolName::Read;
         routes.push((
@@ -218,6 +226,11 @@ pub(crate) fn builtin_direct_tools(config: &HarnessConfig) -> Vec<ToolDefinition
         tools.push(crate::core::features::model_wait::tool(
             config.settings.tools.max_wait_ms,
             &config.settings.prompts.wait_description,
+        ));
+    }
+    if config.settings.tools.agent_compaction.is_enabled() {
+        tools.push(crate::core::features::agent_compaction::tool(
+            &config.settings.prompts.request_compaction_description,
         ));
     }
     tools.extend(
@@ -693,5 +706,45 @@ Example:
         assert!(!result.contains("old_str: string"));
         assert!(result.contains("type ReadFileReturned = {"));
         assert!(result.contains("Promise<ReadFileReturned>"));
+    }
+
+    ///
+    /// *Prepare*: A configuration with agent compaction disabled, then enabled.
+    /// *Do*: Assemble the model-visible catalog and the direct routes of each.
+    /// *Assert*: The tool exists in neither when disabled, and in both when enabled, with
+    /// `handoff_path` as its only required argument.
+    ///
+    #[test]
+    fn request_compaction_is_offered_only_when_agent_compaction_is_enabled() {
+        // Prepare
+        let mut disabled = config();
+        disabled.settings.tools.agent_compaction =
+            crate::core::features::agent_compaction::Mode::Disabled;
+        let mut enabled = disabled.clone();
+        enabled.settings.tools.agent_compaction =
+            crate::core::features::agent_compaction::Mode::Enabled;
+
+        // Do
+        let catalogue = |config: &HarnessConfig| {
+            builtin_direct_tools(config)
+                .into_iter()
+                .find(|tool| tool.name == "request_compaction")
+        };
+        let routed = |config: &HarnessConfig| {
+            direct_routes(config)
+                .into_iter()
+                .any(|(name, _)| name == "request_compaction")
+        };
+
+        // Assert
+        assert!(catalogue(&disabled).is_none());
+        assert!(!routed(&disabled));
+        let tool = catalogue(&enabled).expect("an enabled session offers compaction");
+        assert!(routed(&enabled));
+        assert_eq!(tool.parameters["required"], json!(["handoff_path"]));
+        assert_eq!(
+            tool.description,
+            enabled.settings.prompts.request_compaction_description
+        );
     }
 }

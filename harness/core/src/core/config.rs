@@ -279,6 +279,11 @@ pub(crate) struct ToolSettings {
     pub model_wait: crate::core::features::model_wait::Mode,
     #[serde(default = "crate::core::features::model_wait::default_max_wait_ms")]
     pub max_wait_ms: u64,
+    #[serde(
+        default,
+        skip_serializing_if = "crate::core::features::agent_compaction::Mode::is_default"
+    )]
+    pub agent_compaction: crate::core::features::agent_compaction::Mode,
     pub programmatic: programmatic_tool_calling::Settings,
     pub large_output: large_output::Policy,
     pub subagents: subagents::Mode,

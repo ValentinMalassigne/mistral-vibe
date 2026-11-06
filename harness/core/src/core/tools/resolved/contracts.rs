@@ -50,6 +50,11 @@ impl ToolContracts {
             ),
             output_schema: Some(crate::core::features::model_wait::output_schema()),
         });
+        runtime.push(RuntimeContract {
+            name: RuntimeBuiltinToolName::AgentCompactionRequest,
+            input_schema: crate::core::features::agent_compaction::input_schema(),
+            output_schema: Some(crate::core::features::agent_compaction::output_schema()),
+        });
         runtime.extend(
             assembly::non_filesystem_runtime_builtin_tools(
                 config.settings.tools.programmatic.max_sleep_ms,

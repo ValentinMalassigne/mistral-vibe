@@ -1,3 +1,4 @@
+pub(super) mod agent_compaction;
 pub(super) mod background_processes;
 pub(super) mod compaction;
 pub(super) mod file_system;

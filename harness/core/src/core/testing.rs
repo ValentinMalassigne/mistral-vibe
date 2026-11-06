@@ -304,6 +304,7 @@ pub(crate) fn config() -> HarnessConfig {
             tools: ToolSettings {
                 max_wait_ms: 3_600_000,
                 model_wait: Default::default(),
+                agent_compaction: Default::default(),
                 programmatic: ProgrammaticToolSettings {
                     mode: Default::default(),
                     sleep: Default::default(),
