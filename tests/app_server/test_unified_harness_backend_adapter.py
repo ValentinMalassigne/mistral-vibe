@@ -3785,6 +3785,41 @@ async def test_enable_subagents_switches_the_subagent_feature(
     assert derivation.core_config.settings.tools.subagents.mode == expected
 
 
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.asyncio
+async def test_enable_agent_compaction_switches_the_compaction_feature(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    config_dir: Path,
+    enabled: bool,
+    process_services: ProcessServices,
+) -> None:
+    """*Prepare*: A user config with `enable_agent_compaction` off or on.
+    *Do*: Derive a Unified Harness session's Core configuration.
+    *Assert*: The Core's agent compaction feature follows the setting.
+    """
+    pytest.importorskip("mistralai_vibe_local_harness.vibe")
+    from vibe.app_server._unified_harness_backend_adapter import UnifiedSessionSettings
+
+    # Prepare
+    monkeypatch.setenv("MISTRAL_API_KEY", "test-key")
+    config_file = config_dir / "config.toml"
+    config = tomllib.loads(config_file.read_text(encoding="utf-8"))
+    config["enable_agent_compaction"] = enabled
+    config_file.write_text(tomli_w.dumps(config), encoding="utf-8")
+    process = runtime_module.HarnessProcess(services=process_services)
+
+    # Do
+    context = await process.build_unified_session_context(
+        SessionOptions(cwd=str(tmp_path), auto_approve=False)
+    )
+    derivation = context.derive(UnifiedSessionSettings())
+
+    # Assert
+    expected = "enabled" if enabled else "disabled"
+    assert derivation.core_config.settings.tools.agent_compaction.mode == expected
+
+
 @pytest.mark.parametrize(
     ("auto_approve", "edit_mode", "shell_mode", "provided_mode"),
     [(False, "ask", "ask", "ask"), (True, "allow", "allow", "allow")],

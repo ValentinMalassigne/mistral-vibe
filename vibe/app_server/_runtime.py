@@ -1723,6 +1723,11 @@ class HarnessProcess:
                                 max_elapsed_ms=60_000,
                                 max_sleep_ms=30_000,
                             ),
+                            agent_compaction=(
+                                RustEnabledRuntimeToolFeature()
+                                if config.enable_agent_compaction
+                                else RustDisabledRuntimeToolFeature()
+                            ),
                             subagents=(
                                 RustEnabledAgentTools(conversation_forking=False)
                                 if config.enable_subagents

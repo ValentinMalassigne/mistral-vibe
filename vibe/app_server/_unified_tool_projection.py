@@ -1804,6 +1804,7 @@ class _ToolLabel:
 _TOOL_LABELS: dict[str, _ToolLabel] = {
     # ── Built-in harness tools ──────────────────────────────────────────
     "ui.ask_user_question": _ToolLabel("Asking", "a question", "Asked"),
+    "request_compaction": _ToolLabel("Compacting", "the context", "Compacted"),
     "self.sleep": _ToolLabel("Sleeping", "", "Slept"),
     "self.wait": _ToolLabel("Waiting", "for input", "Waited"),
     "agents.list_configs": _ToolLabel("Listing", "subagent configs", "Listed"),

@@ -982,6 +982,14 @@ class VibeConfigSchema(ConfigSchema):
             "the agent works alone."
         ),
     )
+    enable_agent_compaction: Annotated[bool, WithReplaceMerge()] = Field(
+        default=False,
+        description=(
+            "Let the agent compact its own context when its plan asks for it. "
+            "The agent writes a handoff note first; the note comes back after "
+            "the summary and the turn continues without waiting for you."
+        ),
+    )
     max_subagents: Annotated[int, WithReplaceMerge()] = Field(
         default=32,
         ge=1,

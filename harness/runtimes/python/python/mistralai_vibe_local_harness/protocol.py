@@ -534,6 +534,10 @@ class RustToolSettings(RustProtocolModel):
         default_factory=RustDisabledRuntimeToolFeature
     )
     max_wait_ms: int = Field(default=3_600_000, gt=0)
+    agent_compaction: RustRuntimeToolFeature = Field(
+        default_factory=RustDisabledRuntimeToolFeature,
+        exclude_if=lambda value: value.mode == "disabled",
+    )
     programmatic: RustProgrammaticToolSettings
     subagents: RustAgentToolFeature
     background_processes: RustRuntimeToolFeature
