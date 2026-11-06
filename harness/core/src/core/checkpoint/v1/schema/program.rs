@@ -10,6 +10,8 @@ pub(in crate::core::checkpoint::v1) enum CheckpointRuntimeBuiltinToolName {
     SelfWait,
     #[serde(rename = "self.sleep")]
     SelfSleep,
+    #[serde(rename = "request_compaction")]
+    AgentCompactionRequest,
     #[serde(rename = "file_system.read_file")]
     FileSystemReadFile,
     #[serde(rename = "file_system.write_file")]
@@ -55,6 +57,7 @@ impl CheckpointRuntimeBuiltinToolName {
         match name {
             RuntimeBuiltinToolName::SelfWait => Self::SelfWait,
             RuntimeBuiltinToolName::SelfSleep => Self::SelfSleep,
+            RuntimeBuiltinToolName::AgentCompactionRequest => Self::AgentCompactionRequest,
             RuntimeBuiltinToolName::FileSystemReadFile => Self::FileSystemReadFile,
             RuntimeBuiltinToolName::FileSystemWriteFile => Self::FileSystemWriteFile,
             RuntimeBuiltinToolName::FileSystemEdit => Self::FileSystemEdit,
@@ -86,6 +89,7 @@ impl CheckpointRuntimeBuiltinToolName {
         match self {
             Self::SelfWait => RuntimeBuiltinToolName::SelfWait,
             Self::SelfSleep => RuntimeBuiltinToolName::SelfSleep,
+            Self::AgentCompactionRequest => RuntimeBuiltinToolName::AgentCompactionRequest,
             Self::FileSystemReadFile => RuntimeBuiltinToolName::FileSystemReadFile,
             Self::FileSystemWriteFile => RuntimeBuiltinToolName::FileSystemWriteFile,
             Self::FileSystemEdit => RuntimeBuiltinToolName::FileSystemEdit,

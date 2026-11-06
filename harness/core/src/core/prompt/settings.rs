@@ -37,6 +37,7 @@ pub(crate) struct PromptSettings {
     pub compaction: compaction::Prompts,
     pub wait_description: String,
     pub discovery_description: String,
+    pub request_compaction_description: String,
 }
 
 /// Generic guidance at the start of the system prompt. Empty text omits that section.
@@ -64,6 +65,7 @@ impl PromptSettings {
             || self.agent_tools != next.agent_tools
             || self.wait_description != next.wait_description
             || self.discovery_description != next.discovery_description
+            || self.request_compaction_description != next.request_compaction_description
     }
 
     pub(crate) fn validate(&self) -> Result<(), CoreError> {
@@ -76,6 +78,10 @@ impl PromptSettings {
             (
                 &self.discovery_description,
                 "settings.prompts.discovery_description",
+            ),
+            (
+                &self.request_compaction_description,
+                "settings.prompts.request_compaction_description",
             ),
         ] {
             if text.trim().is_empty() {

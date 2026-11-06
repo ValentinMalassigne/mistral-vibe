@@ -8,6 +8,8 @@ use crate::core::hooks::{HookToolKey, HookToolTarget};
 pub(crate) enum RuntimeBuiltinToolName {
     SelfWait,
     SelfSleep,
+    /// Compact the Session's own context when the Turn ends.
+    AgentCompactionRequest,
     FileSystemReadFile,
     FileSystemWriteFile,
     FileSystemEdit,
@@ -57,6 +59,7 @@ impl RuntimeBuiltinToolName {
         match self {
             Self::SelfWait => "self.wait",
             Self::SelfSleep => "self.sleep",
+            Self::AgentCompactionRequest => "request_compaction",
             Self::FileSystemReadFile => "file_system.read_file",
             Self::FileSystemWriteFile => "file_system.write_file",
             Self::FileSystemEdit => "file_system.edit",
@@ -86,6 +89,7 @@ impl RuntimeBuiltinToolName {
         match value {
             "self.wait" => Some(Self::SelfWait),
             "self.sleep" => Some(Self::SelfSleep),
+            "request_compaction" => Some(Self::AgentCompactionRequest),
             "file_system.read_file" => Some(Self::FileSystemReadFile),
             "file_system.write_file" => Some(Self::FileSystemWriteFile),
             "file_system.edit" => Some(Self::FileSystemEdit),
@@ -153,6 +157,7 @@ impl RuntimeBuiltinToolName {
         match self {
             Self::SelfWait
             | Self::SelfSleep
+            | Self::AgentCompactionRequest
             | Self::SubagentList
             | Self::SubagentListConfigs
             | Self::SubagentSendMessage
@@ -181,6 +186,7 @@ impl RuntimeBuiltinToolName {
     fn direct_model_name(self, invocation_name: &str) -> Option<String> {
         match self {
             Self::SelfWait => Some("wait".to_string()),
+            Self::AgentCompactionRequest => Some("request_compaction".to_string()),
             Self::FileSystemReadFile => Some("read_file".to_string()),
             Self::FileSystemWriteFile => Some("write_file".to_string()),
             Self::FileSystemEdit | Self::DeprecatedFileSystemSearchReplace => {
@@ -212,6 +218,7 @@ impl RuntimeBuiltinToolName {
         match self {
             Self::SelfWait => None,
             Self::SelfSleep => Some("sleep".to_string()),
+            Self::AgentCompactionRequest => None,
             Self::FileSystemReadFile => Some("read_file".to_string()),
             Self::FileSystemWriteFile => Some("write_file".to_string()),
             Self::FileSystemEdit | Self::DeprecatedFileSystemSearchReplace => {
@@ -240,7 +247,9 @@ impl RuntimeBuiltinToolName {
 
     fn hook_tool_key(self) -> HookToolKey {
         let target = match self {
-            Self::SelfSleep | Self::SelfWait => HookToolTarget::SelfTool,
+            Self::SelfSleep | Self::SelfWait | Self::AgentCompactionRequest => {
+                HookToolTarget::SelfTool
+            }
             Self::FileSystemReadFile
             | Self::FileSystemWriteFile
             | Self::FileSystemEdit
