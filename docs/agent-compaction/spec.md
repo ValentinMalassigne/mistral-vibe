@@ -1,119 +1,114 @@
-# Spec — Compaction déclenchée par l'agent
+# Spec — Agent-triggered compaction
 
-Statut : proposition validée sur le code de `main` @ v3.1.0 (`c96a6dbb`).
-Branche : `feat/agent-compact`. Fork : `ValentinMalassigne/mistral-vibe`.
+Status: proposal validated against `main` @ v3.1.0 (`c96a6dbb`).
+Branch: `feat/agent-compact`. Fork: `ValentinMalassigne/mistral-vibe`.
 
-## 1. Objectif
+## 1. Goal
 
-Aujourd'hui `/compact` est une commande **utilisateur** : l'humain décide de compacter. Le
-déclenchement automatique, lui, est purement réactif (seuil de tokens). Il manque le cas
-intermédiaire : **l'agent sait** qu'il arrive à un point de rupture et veut compacter
-lui-même, au bon moment.
+Today `/compact` is a **user** command: the human decides to compact. Automatic compaction is
+purely reactive (a token threshold). The middle case is missing: **the agent knows** it is
+reaching a breaking point and wants to compact itself, at the right moment.
 
-Cas d'usage cible : l'agent suit un plan (`plan.md` ou équivalent) qui contient une étape
-explicite du type « compacter le contexte avant de passer à la phase suivante ». Aujourd'hui
-l'agent ne peut que le signaler en texte et attendre que l'humain tape `/compact`, ce qui
-casse le flux.
+Target use case: the agent follows a plan (`plan.md` or equivalent) containing an explicit step
+such as "compact the context before moving to the next phase". Today the agent can only say so
+in prose and wait for the human to type `/compact`, which breaks the flow.
 
-L'agent peut donc demander une compaction, en fournissant une **note de passation**
-(checkpoint) qui survit à la compaction. La compaction devient non destructive : le résumé
-remplace l'historique, la note réinjecte ce qui compte pour la suite.
+So the agent can request a compaction, supplying a **handoff note** (a checkpoint) that survives
+the compaction. Compaction becomes non-destructive: the summary replaces the history, the note
+re-injects what matters for what comes next.
 
-## 2. Non-objectifs
+## 2. Non-goals
 
-- Pas de compaction en cours de tour côté agent (voir §4.1 : la machine à états l'interdit).
-- Pas de remplacement de l'autocompaction par seuil : les deux coexistent.
-- Pas d'accès agent aux commandes slash en général. Un seul point d'entrée, étroit.
-- Pas de changement du prompt de résumé côté agent : il ne peut pas réécrire la consigne de
-  compaction, seulement ajouter des instructions libres.
+- No agent-initiated compaction mid-turn (see §4.1: the state machine forbids it).
+- No replacement of threshold-based auto-compaction: both coexist.
+- No general agent access to slash commands. One narrow entry point only.
+- No change to the summary prompt from the agent side: it cannot rewrite the compaction
+  instruction, only add free-form instructions.
 
-## 3. Comportement attendu
+## 3. Expected behaviour
 
 ```
-agent suit plan.md
-  └─ étape "compacter avant phase 2"
-       ├─ 1. agent écrit son checkpoint (write_file) → .vibe/handoff-phase2.md
-       ├─ 2. agent appelle request_compaction(handoff_path=..., extra_instructions=...)
-       │       └─ le harness valide, met l'intention en attente
-       ├─ 3. l'agent termine son tour (plus aucun outil à appeler)
-       ├─ 4. le harness lance la compaction (trigger = agent)
-       │       ├─ résumé de l'historique par le modèle
-       │       ├─ historique remplacé par le résumé
-       │       └─ le checkpoint est réinjecté juste après le résumé
-       └─ 5. le tour reprend : l'agent reçoit le résumé + sa note et continue la phase 2
+agent follows plan.md
+  └─ step "compact before phase 2"
+       ├─ 1. agent writes its checkpoint (write_file) → .vibe/handoff-phase2.md
+       ├─ 2. agent calls request_compaction(handoff_path=..., extra_instructions=...)
+       │       └─ the harness validates, holds the intent as pending
+       ├─ 3. the agent ends its turn (no tool left to call)
+       ├─ 4. the harness runs the compaction (trigger = agent)
+       │       ├─ the model summarises the history
+       │       ├─ the history is replaced by the summary
+       │       └─ the checkpoint is re-injected right after the summary
+       └─ 5. the turn resumes: the agent receives summary + note and continues phase 2
 ```
 
-Points clés :
+Key points:
 
-- **Étape 5 est le cœur de la valeur.** L'agent ne s'arrête pas pour attendre l'humain : le
-  tour continue après la compaction, comme le fait déjà l'autocompaction en cours de tour
-  (`CompactionResolution::ContinueTurn`). Le plan se déroule sans intervention.
-- La compaction est **différée à la fin du tour**, pas immédiate (§4.1).
-- Le résumé et la note arrivent dans le même tour, donc l'agent n'a pas besoin d'un nouveau
-  message utilisateur pour reprendre.
-- La note est un fichier sur disque : elle reste lisible par l'humain, et elle survit même
-  si la compaction échoue.
+- **Step 5 is where the value is.** The agent does not stop to wait for the human: the turn
+  continues after the compaction, as in-turn auto-compaction already does
+  (`CompactionResolution::ContinueTurn`). The plan unfolds without intervention.
+- Compaction is **deferred to the end of the turn**, not immediate (§4.1).
+- The summary and the note arrive in the same turn, so the agent needs no new user message to
+  resume.
+- The note is a file on disk: the human can read it, and it survives even if the compaction
+  fails.
 
-## 4. Décisions de conception
+## 4. Design decisions
 
-### 4.1 La compaction est différée à la fin du tour — et c'est la seule option
+### 4.1 Compaction is deferred to the end of the turn — and that is the only option
 
-`TurnEvent::ManualCompaction` n'est accepté que si le tour n'est ni `Active` ni `Compacting`
-(`harness/core/src/core/turn.rs:129`), sinon `invalid_state`. Un outil qui tenterait de
-compacter en cours de tour échouerait systématiquement.
+`TurnEvent::ManualCompaction` is accepted only when the turn is neither `Active` nor
+`Compacting` (`harness/core/src/core/turn.rs:129`), otherwise `invalid_state`. A tool that tried
+to compact mid-turn would fail every time.
 
-Le chemin « prochain tour » n'est donc pas une préférence de prudence, c'est le seul
-compatible avec la machine à états. Et il se trouve que c'est le comportement souhaité : la
-compaction après la fin du tour, suivie d'une reprise automatique, est exactement ce qu'un
-agent qui suit un plan attend.
+So the "next turn" path is not a cautious preference, it is the only one compatible with the
+state machine. And it happens to be the desired behaviour: compaction after the turn ends,
+followed by an automatic resume, is exactly what a plan-following agent expects.
 
-### 4.2 Un outil direct, nommé `request_compaction`
+### 4.2 A direct tool, named `request_compaction`
 
-Le nom dit ce qui se passe : on **demande**, on ne déclenche pas synchroniquement. Un modèle
-qui appelle `compact` et reçoit « fait » alors que rien n'a encore été compacté serait
-trompé.
+The name says what happens: we **request**, we do not trigger synchronously. A model calling
+`compact` and receiving "done" while nothing has been compacted yet would be misled.
 
-Surface : **outil direct** (comme `wait`, `read_file`), pas le namespace TypeScript `self.*`.
-Raison : l'outil ne sert pas à écrire des programmes, et le namespace programmatique impose
-en plus le schéma de checkpoint des programmes. Détail des coûts en §2 du plan.
+Surface: a **direct tool** (like `wait`, `read_file`), not the TypeScript `self.*` namespace.
+Reason: the tool is not for writing programs, and the programmatic namespace additionally
+imposes the program checkpoint schema. Cost details in §2 of the plan.
 
-### 4.3 Le checkpoint est obligatoire
+### 4.3 The checkpoint is mandatory
 
-`handoff_path` est un paramètre **requis**. Sans note, une compaction est une perte
-d'information assumée mais aveugle : c'est précisément l'accident que l'agent est le mieux
-placé pour éviter, puisque c'est lui qui sait ce qui va lui manquer.
+`handoff_path` is a **required** parameter. Without a note, a compaction is an accepted but
+blind loss of information: that is precisely the accident the agent is best placed to avoid,
+since it is the one that knows what it is about to miss.
 
-Le harness refuse la demande si le fichier est absent ou vide, avec un message qui dit à
-l'agent d'écrire la note d'abord.
+The harness refuses the request if the file is missing or empty, with a message telling the
+agent to write the note first.
 
-### 4.4 Le harness ne lit pas le fichier
+### 4.4 The harness does not read the file
 
-Core ne fait pas d'I/O fichier : il émet des actions, le runtime les exécute. Dans cette
-architecture, c'est le **runtime Python** qui lit le checkpoint au moment de l'exécution de
-l'outil, et qui renvoie son contenu (borné) au core dans le résultat structuré de l'outil.
-Core stocke cette note et l'injecte après le résumé. Aucune exception au principe de
-propriété Core/Runtime.
+Core performs no file I/O: it emits actions, the runtime executes them. In this architecture,
+the **Python runtime** reads the checkpoint when the tool executes, and returns its (bounded)
+content to core in the tool's structured result. Core stores that note and injects it after the
+summary. No exception to the Core/Runtime ownership principle.
 
-Taille bornée (8 Kio par défaut, tronqué avec mention explicite) : une note trop grosse
-mangerait la fenêtre qu'on vient de libérer.
+Size is bounded (8 KiB by default, truncated with an explicit mention): an oversized note would
+eat the window that was just freed.
 
-### 4.5 Trace différenciée
+### 4.5 A distinct trace
 
-Nouvelle valeur `CompactionTrigger::Agent` à côté de `Manual` et `Automatic`, pour que les
-logs, la télémétrie et l'UI distinguent les trois origines. Le résumé est produit par le
-même chemin que la compaction manuelle.
+A new `CompactionTrigger::Agent` value next to `Manual` and `Automatic`, so logs, telemetry and
+the UI distinguish the three origins. The summary is produced by the same path as manual
+compaction.
 
-## 5. L'outil
+## 5. The tool
 
 ```
 request_compaction(
-  handoff_path: string,          // requis, chemin relatif au workspace
-  extra_instructions?: string,   // consignes additionnelles pour le résumé
-  reason?: string                // une ligne, journalisée, pas envoyée au résumeur
+  handoff_path: string,          // required, path relative to the workspace
+  extra_instructions?: string,   // additional instructions for the summary
+  reason?: string                // one line, logged, not sent to the summariser
 )
 ```
 
-Description exposée au modèle (à affiner) :
+Description exposed to the model (to be refined):
 
 > Compact the conversation to free context. Use it when your current plan says to compact
 > before continuing, or when you are about to start a long phase that needs room. Before
@@ -121,50 +116,49 @@ Description exposée au modèle (à affiner) :
 > remaining steps — to `handoff_path`. The compaction runs when your turn ends and the
 > conversation resumes right after, with your handoff note re-injected.
 
-Résultat structuré renvoyé au core par le runtime :
+Structured result returned to core by the runtime:
 
 ```json
 {
-  "handoff_note": "<contenu du fichier, borné>",
+  "handoff_note": "<file content, bounded>",
   "handoff_bytes": 1234,
   "truncated": false
 }
 ```
 
-Pas de champ « accepted » : le runtime ne décide de rien, il lit le fichier et le passe. C'est
-le core qui accepte ou refuse, immédiatement, pour que le modèle voie le refus dans le même
-tour.
+No `accepted` field: the runtime decides nothing, it reads the file and passes it on. Core
+accepts or refuses, immediately, so the model sees the refusal within the same turn.
 
-En cas de refus, l'outil retourne un échec (`Failure`) et **rien n'est mis en attente** :
-fichier absent ou vide, chemin hors workspace, flag désactivé, garde-fou de contexte, quota
-atteint, ou compaction déjà en attente. Le message d'échec doit être actionnable (dire quoi
-faire), parce que le modèle va le lire.
+On refusal the tool returns a failure (`Failure`) and **nothing is held pending**: missing or
+empty file, path outside the workspace, flag disabled, context guard, quota reached, or a
+compaction already pending. The failure message must be actionable (say what to do), because
+the model will read it.
 
-## 6. Garde-fous
+## 6. Guards
 
-| Garde-fou | Comportement | Défaut |
+| Guard | Behaviour | Default |
 |---|---|---|
-| Activation | Outil non exposé si désactivé (le modèle ne le voit même pas) | désactivé |
-| Plancher de contexte | Refus si le contexte estimé est sous le plancher | 20 000 tokens |
-| Quota par session | Refus au-delà de N compactions déclenchées par l'agent | 8 |
-| Déjà en attente | Refus si une compaction est déjà en attente ou en cours | — |
-| Croissance minimale | Refus si moins de X tokens ajoutés depuis la précédente compaction agent | 5 000 |
-| Cooldown | Pas deux compactions agent dans le même tour | — |
+| Activation | Tool not exposed when disabled (the model never sees it) | disabled |
+| Context floor | Refuse when the estimated context is below the floor | 20,000 tokens |
+| Per-session quota | Refuse beyond N agent-triggered compactions | 8 |
+| Already pending | Refuse when a compaction is already pending or running | — |
+| Minimum growth | Refuse when fewer than X tokens were added since the last agent compaction | 5,000 |
+| Cooldown | Never two agent compactions in the same turn | — |
 
-Justification du plancher : sous ~20 K tokens, un résumé coûte un appel modèle, produit un
-résumé moins bon que l'original, et fait perdre des détails pour un gain nul. Le plancher
-empêche l'agent de « compacter pour compacter » en début de session.
+Why a floor: below ~20K tokens a summary costs a model call, produces a worse summary than the
+original, and loses detail for no gain. The floor stops the agent from "compacting for the sake
+of compacting" early in a session.
 
-Justification de la croissance minimale : c'est la protection anti-boucle réelle. Un quota
-seul laisse passer une rafale de compactions inutiles en fin de session.
+Why minimum growth: it is the real anti-loop protection. A quota alone lets a burst of useless
+compactions through at the end of a session.
 
-Les refus sont des échecs d'outil, pas des erreurs de protocole : le tour continue, le modèle
-voit pourquoi et poursuit sans compacter.
+Refusals are tool failures, not protocol errors: the turn continues, the model sees why and
+carries on without compacting.
 
 ## 7. Configuration
 
-Un seul bloc, désactivé par défaut (cohérent avec la convention du repo : un outil qui change
-le contexte ne s'active pas tout seul). `~/.vibe/config.toml` :
+A single block, disabled by default (consistent with the repo convention: a tool that changes
+the context does not enable itself). `~/.vibe/config.toml`:
 
 ```toml
 [tools.agent_compaction]
@@ -175,42 +169,41 @@ min_growth_tokens = 5000
 max_handoff_bytes = 8192
 ```
 
-Le flag doit être visible dans `vibe config` et dans le schéma de config, avec migration
-`vibe_schema.py` mise à jour.
+The flag must be visible in `vibe config` and in the config schema, with the `vibe_schema.py`
+migration updated.
 
-## 8. Observabilité
+## 8. Observability
 
-- Observation `ContextCompacted { trigger: agent, .. }` : l'UI affiche l'origine.
-- La note de passation est un message de contexte injecté, visible dans l'historique : on
-  peut vérifier après coup ce que l'agent a décidé de conserver.
-- Télémétrie : événement de compaction déjà existant, avec la nouvelle valeur de trigger.
-- Log : `reason` de l'outil.
+- Observation `ContextCompacted { trigger: agent, .. }`: the UI shows the origin.
+- The handoff note is an injected context message, visible in the history: you can check
+  afterwards what the agent decided to keep.
+- Telemetry: the existing compaction event, with the new trigger value.
+- Log: the tool's `reason`.
 
-## 9. Critères d'acceptation
+## 9. Acceptance criteria
 
-1. Flags désactivés : l'outil n'apparaît pas dans le catalogue ; aucun chemin de code agent
-   ne peut compacter.
-2. Plan qui demande une compaction : l'agent écrit sa note, appelle l'outil, le tour se
-   termine, la compaction tourne, le tour reprend, et l'agent continue sans message humain.
-3. Après reprise, l'historique contient le résumé **et** la note de passation, dans cet ordre.
-4. Un fichier de passation absent ou vide fait échouer l'outil, sans compaction, avec un
-   message qui dit d'écrire la note d'abord.
-5. Sous le plancher de contexte : refus, message explicite, pas de compaction.
-6. Quota atteint : refus, message explicite, pas de compaction.
-7. Deux appels dans le même tour : le second est refusé, une seule compaction.
-8. La compaction manuelle `/compact` et l'autocompaction par seuil sont inchangées.
-9. Une compaction agent qui échoue (résumé refusé, trop gros, cut-off) laisse le tour
-   reprendre avec l'historique d'origine : pas de perte silencieuse.
-10. `/compact` reste utilisable pendant qu'une compaction agent est en attente.
+1. Flags disabled: the tool does not appear in the catalogue; no agent code path can compact.
+2. A plan that asks for a compaction: the agent writes its note, calls the tool, the turn ends,
+   the compaction runs, the turn resumes, and the agent continues without a human message.
+3. After the resume, the history holds the summary **and** the handoff note, in that order.
+4. A missing or empty handoff file makes the tool fail, with no compaction, and a message
+   telling the agent to write the note first.
+5. Below the context floor: refusal, explicit message, no compaction.
+6. Quota reached: refusal, explicit message, no compaction.
+7. Two calls in the same turn: the second is refused, a single compaction.
+8. Manual `/compact` and threshold-based auto-compaction are unchanged.
+9. An agent compaction that fails (summary rejected, too large, cut off) leaves the turn
+   resuming with the original history: no silent loss.
+10. `/compact` remains usable while an agent compaction is pending.
 
-## 10. Risques
+## 10. Risks
 
-- **Dérive upstream** : le point d'accroche principal (`apply_tool_batch_transition`,
-  `turn.rs:701`) et la machine à états sont du code actif. C'est le principal risque de
-  conflit, pas la taille du diff. Mitigation : diff petit et localisé, rebase régulier.
-- **Le modèle appelle l'outil trop tôt ou trop souvent** : couvert par les garde-fous, et par
-  le fait que l'outil n'est proposé que si activé.
-- **Qualité du résumé** : identique à `/compact`, pas de régression attendue. La note de
-  passation compense la perte de détail, c'est tout l'intérêt du design.
-- **Surprise utilisateur** : une compaction non demandée change l'historique. Mitigation :
-  trace `trigger = agent`, et le flag est opt-in.
+- **Upstream drift**: the main hook (`apply_tool_batch_transition`, `turn.rs:701`) and the state
+  machine are active code. That is the main conflict risk, not the size of the diff. Mitigation:
+  a small, localised diff and regular rebases.
+- **The model calls the tool too early or too often**: covered by the guards, and by the fact
+  that the tool is only offered when enabled.
+- **Summary quality**: identical to `/compact`, no regression expected. The handoff note offsets
+  the loss of detail, which is the whole point of the design.
+- **User surprise**: an unrequested compaction changes the history. Mitigation: the
+  `trigger = agent` trace, and the flag is opt-in.

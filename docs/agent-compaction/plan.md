@@ -1,73 +1,72 @@
-# Plan technique — Compaction déclenchée par l'agent
+# Technical plan — Agent-triggered compaction
 
-Cible : `main` @ `c96a6dbb` (v3.1.0). Les numéros de ligne sont ceux de ce commit.
-Ce plan corrige la carte du code du handoff sur trois points structurants (voir §1).
+Target: `main` @ `c96a6dbb` (v3.1.0). Line numbers refer to that commit.
+This plan corrects the handoff's code map on three structural points (see §1).
 
-Règle de travail retenue pour ce fork : **on suit les conventions du repo**. Une
-fonctionnalité ajoutée s'aligne sur l'existant (défauts, nommage, structure, tests) plutôt que
-d'imposer ses propres choix. En cas de conflit réel entre ce qu'on veut et la convention, on
-le remonte et on ne tranche pas unilatéralement.
+Working rule for this fork: **we follow the repo conventions**. An added feature aligns with
+what already exists (defaults, naming, structure, tests) rather than imposing its own choices.
+When a real conflict appears between what we want and the convention, we raise it and do not
+decide unilaterally.
 
-À lire avant de coder (le repo l'exige pour toute capacité agent) : `AGENTS.md` à la racine,
-et les ADR [0002](../../docs/adr/0002-core-engine-and-delivery-surfaces.md) (propriété
-Core/Runtime), [0004](../../docs/adr/0004-typed-permissioned-tools.md) (contrat des outils) et
-[0018](../../docs/adr/0018-modular-app-server-capabilities.md) (nouvelle capacité).
+Read before coding (the repo requires this for any agent capability): `AGENTS.md` at the root,
+plus ADR [0002](../../docs/adr/0002-core-engine-and-delivery-surfaces.md) (Core/Runtime
+ownership), [0004](../../docs/adr/0004-typed-permissioned-tools.md) (tool contract) and
+[0018](../../docs/adr/0018-modular-app-server-capabilities.md) (new capability).
 
-## 1. Architecture réelle (et ce que le handoff supposait de travers)
+## 1. Actual architecture (and what the handoff got wrong)
 
 ```
-vibe-rs (TUI Rust, client mince)
+vibe-rs (Rust TUI, thin client)
    │  app-server JSON-RPC
    ▼
-vibe-app-server (Python)  ── config, sessions, projections UI
+vibe-app-server (Python)  ── config, sessions, UI projections
    │  Step Protocol (HarnessCommand / Action / Observation)
    ▼
-Unified Harness Core (Rust, harness/core)  ── machine à états, outils, compaction
+Unified Harness Core (Rust, harness/core)  ── state machine, tools, compaction
    ▲
-   │  actions d'exécution
-Runtime Python (harness/runtimes/python)  ── exécute réellement les outils
+   │  execution actions
+Python Runtime (harness/runtimes/python)  ── actually executes the tools
 ```
 
-Trois corrections par rapport au handoff :
+Three corrections against the handoff:
 
-| Handoff | Réalité |
+| Handoff | Reality |
 |---|---|
-| L'outil s'implémente dans `harness/core` | Core **déclare** l'outil (schéma + route) mais le **runtime Python l'exécute**. Un outil ne peut pas muter l'état core ; il renvoie un résultat que core interprète. |
-| Compaction mid-turn = option risquée | `TurnEvent::ManualCompaction` est refusé si `TurnState::Active` ou `Compacting` (`turn.rs:129`). Mid-turn est **impossible** sans réécrire la machine à états. |
-| Le trigger est local | `CompactionTrigger` est sérialisé jusqu'au client (`protocol.py:1408,1419,1493`) : une nouvelle variante touche le runtime Python et la TUI. |
+| The tool is implemented in `harness/core` | Core **declares** the tool (schema + route) but the **Python runtime executes it**. A tool cannot mutate core state; it returns a result that core interprets. |
+| Mid-turn compaction = risky option | `TurnEvent::ManualCompaction` is refused when `TurnState::Active` or `Compacting` (`turn.rs:129`). Mid-turn is **impossible** without rewriting the state machine. |
+| The trigger is local | `CompactionTrigger` is serialised all the way to the client (`protocol.py:1408,1419,1493`): a new variant touches the Python runtime and the TUI. |
 
-Deux bonnes nouvelles : `/compact` passe déjà par un chemin réutilisable
-(`HarnessCommand::Compact` → `router.rs:80` → `TurnEvent::ManualCompaction`), et le moteur
-sait déjà **reprendre un tour après compaction** (`CompactionResolution::ContinueTurn`,
-`turn.rs:250`) : c'est exactement le mécanisme dont on a besoin pour que l'agent continue son
-plan après avoir compacté.
+Two pieces of good news: `/compact` already goes through a reusable path
+(`HarnessCommand::Compact` → `router.rs:80` → `TurnEvent::ManualCompaction`), and the engine
+already knows how to **resume a turn after compaction**
+(`CompactionResolution::ContinueTurn`, `turn.rs:250`) — exactly the mechanism needed for the
+agent to continue its plan after compacting.
 
-## 2. Flux de bout en bout
+## 2. End-to-end flow
 
 ```
-1. modèle appelle  request_compaction{handoff_path, extra_instructions, reason}
-2. core (assembly) a routé l'outil → Action ToolCall → runtime
-3. runtime : lit le handoff, valide, renvoie Success{handoff_note, truncated, bytes}
-4. core finish_tool_batch_action (batch.rs:481) : détecte le succès,
-   stocke PendingAgentCompaction{handoff_note, extra_instructions} dans HarnessState
-5. le modèle termine son tour (aucun outil restant)
-6. core apply_tool_batch_transition (turn.rs:701), branche ContinueTurn :
-   au lieu de continuer le tour, si pending → start_compaction(CompactionRequest::Agent{..})
-7. compaction : résumé, remplacement de l'historique (compacted(), execution.rs:198)
-8. apply_compaction_resolution → ContinueTurn (turn.rs:250) :
-   la note de passation est injectée dans le contexte, puis continue_after_compaction
-9. l'agent reçoit résumé + note et poursuit la phase suivante
+1. model calls      request_compaction{handoff_path, extra_instructions, reason}
+2. core (assembly) routed the tool → ToolCall Action → runtime
+3. runtime: reads the handoff, validates, returns Success{handoff_note, truncated, bytes}
+4. core finish_pending_tool (turn.rs:330): runs the guards, then stores
+   PendingAgentCompaction{handoff_note, extra_instructions} in HarnessState
+5. the model ends its turn (no tool left to call)
+6. core apply_tool_batch_transition (turn.rs:701), ContinueTurn branch:
+   instead of continuing the turn, if pending → start_compaction(CompactionRequest::Agent{..})
+7. compaction: summary, history replacement (compacted(), execution.rs:198)
+8. apply_compaction_resolution → ContinueTurn (turn.rs:250):
+   the handoff note is injected into the context, then continue_after_compaction
+9. the agent receives summary + note and continues with the next phase
 ```
 
-Le point 6 est le seul vrai point d'insertion dans la machine à états. Il réutilise
-`apply_in_turn_compaction_start` (`turn.rs:446`), déjà écrit pour l'autocompaction en cours de
-tour.
+Step 6 is the only real insertion point in the state machine. It reuses
+`apply_in_turn_compaction_start` (`turn.rs:446`), already written for in-turn auto-compaction.
 
-## 3. Modifications Core (Rust)
+## 3. Core changes (Rust)
 
-### 3.1 `harness/core/src/core/features/agent_compaction.rs` — nouveau
+### 3.1 `harness/core/src/core/features/agent_compaction.rs` — new
 
-Calqué sur `model_wait.rs` (même rôle : un outil conditionné par les settings).
+Modelled on `model_wait.rs` (same role: a tool gated by settings).
 
 ```rust
 //! Agent-requested compaction: the settings, the guards and the tool contract.
@@ -98,14 +97,14 @@ pub(crate) struct Settings {
     pub max_handoff_bytes: u64,
 }
 
-impl Default for Settings { /* enabled: false, le reste aux défauts */ }
+impl Default for Settings { /* enabled: false, everything else at its default */ }
 
 impl Settings {
     pub(crate) fn is_default(&self) -> bool { *self == Self::default() }
     pub(crate) fn is_offered(&self) -> bool { self.enabled }
 }
 
-/// Le résultat structuré que le runtime renvoie après lecture du handoff.
+/// The structured result the runtime returns after reading the handoff.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HandoffReply {
@@ -114,8 +113,8 @@ pub(crate) struct HandoffReply {
     pub truncated: bool,
 }
 
-/// Pourquoi une demande a été refusée. Chaque variant produit un message
-/// actionnable : le modèle le lit et doit pouvoir se corriger.
+/// Why a request was refused. Every variant produces an actionable message:
+/// the model reads it and must be able to correct itself.
 pub(crate) enum Refusal {
     Disabled,
     BelowFloor { estimated: u64, floor: u64 },
@@ -129,11 +128,11 @@ impl Refusal {
 }
 
 pub(crate) fn tool(description: &str, settings: &Settings) -> ToolDefinition {
-    /* schéma JSON ci-dessous ; `description` vient des prompts, cf. §3.1b */
+    /* JSON schema below; `description` comes from the prompts, cf. §3.1b */
 }
 ```
 
-Schéma de l'outil :
+Tool schema:
 
 ```json
 {
@@ -148,22 +147,22 @@ Schéma de l'outil :
 }
 ```
 
-### 3.1b La description de l'outil va dans les prompts — convention du repo
+### 3.1b The tool description lives in the prompts — repo convention
 
-`wait` ne code pas sa description en dur : elle est dans
-`core/prompt/default_prompts.json` et surchargeable par `settings.prompts.wait_description`.
-On suit la même règle, sinon l'outil sera le seul du catalogue à ne pas être personnalisable
-(`prompt/settings.rs:38`). Quatre points de contact en plus :
+`wait` does not hardcode its description: it sits in `core/prompt/default_prompts.json` and can
+be overridden through `settings.prompts.wait_description`. We follow the same rule, otherwise
+this will be the only tool in the catalogue that is not customisable
+(`prompt/settings.rs:38`). Four additional touch points:
 
-1. `core/prompt/default_prompts.json` : entrée `request_compaction_description` (texte anglais,
-   même ton que `wait_description`).
-2. `core/prompt/settings.rs` : champ `pub request_compaction_description: String` dans
+1. `core/prompt/default_prompts.json`: a `request_compaction_description` entry (English text,
+   same tone as `wait_description`).
+2. `core/prompt/settings.rs`: a `pub request_compaction_description: String` field in
    `PromptSettings`.
-3. `PromptSettings::tool_text_changed` (ligne 62) : ajouter la comparaison — sans quoi un
-   changement de description ne révoque pas le catalogue d'outils.
-4. `PromptSettings::validate` (ligne 70) : ajouter la paire au contrôle « prompt non vide ».
+3. `PromptSettings::tool_text_changed` (line 62): add the comparison — without it a description
+   change does not revoke the tool catalogue.
+4. `PromptSettings::validate` (line 70): add the pair to the "prompt must not be empty" check.
 
-Texte proposé (anglais, à placer dans `default_prompts.json`) :
+Proposed text (goes into `default_prompts.json`):
 
 > Compact the conversation to free context. Use it when your current plan says to compact
 > before continuing, or when you are about to start a long phase that needs room. Before
@@ -171,42 +170,42 @@ Texte proposé (anglais, à placer dans `default_prompts.json`) :
 > remaining steps) to `handoff_path`. The compaction runs when your turn ends and the
 > conversation resumes right after, with your handoff note re-injected.
 
-### 3.2 `core/config.rs` — `ToolSettings` (ligne 277)
+### 3.2 `core/config.rs` — `ToolSettings` (line 277)
 
 ```rust
 #[serde(default, skip_serializing_if = "agent_compaction::Settings::is_default")]
 pub agent_compaction: agent_compaction::Settings,
 ```
 
-`ToolSettings` a `deny_unknown_fields` : sans conséquence ici puisque core et runtime sont
-rebuildés ensemble dans le fork. Pour une PR upstream, la direction compatible est celle-ci
-(ancienne config + core neuf), cf. ADR 0014.
+`ToolSettings` has `deny_unknown_fields`: harmless here since core and runtime are rebuilt
+together in the fork. For an upstream PR, this is the compatible direction (old config, new
+core), cf. ADR 0014.
 
 ### 3.3 `core/tools/external.rs`
 
-- `RuntimeBuiltinToolName::AgentCompactionRequest` (variant).
+- `RuntimeBuiltinToolName::AgentCompactionRequest` (new variant).
 - `as_str()` → `"request_compaction"`.
-- `from_str` (autour de la ligne 87) → le nom inverse.
-- `direct_name()` (ligne 183 et 213 : la variante `Some(...)`) → `Some("request_compaction")`.
-- `hook_target()` (ligne 243) → `HookToolTarget::SelfTool`. Choix assumé : c'est un outil
-  interne de Core, et `self` est déjà le groupe des outils de contrôle internes
-  (`self.wait`, `self.sleep`). Évite de toucher le contrat des hooks utilisateur.
-- `checkpoint/v1/schema/program.rs` n'est à toucher que si l'outil doit être appelable depuis
-  un programme TypeScript. **Non retenu en v1** → pas de changement de checkpoint.
+- `from_str` (around line 87) → the inverse name.
+- `direct_name()` (lines 183 and 213: the `Some(...)` arm) → `Some("request_compaction")`.
+- `hook_target()` (line 243) → `HookToolTarget::SelfTool`. Deliberate choice: this is an
+  internal Core tool, and `self` is already the group for internal control tools (`self.wait`,
+  `self.sleep`). Avoids touching the user-facing hooks contract.
+- `checkpoint/v1/schema/program.rs` only needs touching if the tool must be callable from a
+  TypeScript program. **Not retained in v1** → no checkpoint change.
 
 ### 3.4 `core/tools/resolved/assembly.rs`
 
-Deux insertions, exactement au même endroit que `wait` :
+Two insertions, exactly where `wait` is added:
 
-- `builtin_direct_tools` (ligne 215) : si `is_offered()`,
+- `builtin_direct_tools` (line 215): when `is_offered()`,
   `tools.push(agent_compaction::tool(&config.settings.prompts.request_compaction_description, &config.settings.tools.agent_compaction))`
-  — même forme que l'appel à `model_wait::tool` juste au-dessus.
-- `direct_routes` (ligne 27) : si `is_offered()`, route `"request_compaction"` vers
+  — same shape as the `model_wait::tool` call right above it.
+- `direct_routes` (line 27): when `is_offered()`, route `"request_compaction"` to
   `ToolTarget::RuntimeBuiltin { name: AgentCompactionRequest }`.
 
-Effet : flag désactivé → l'outil n'existe ni dans le catalogue du modèle, ni dans le routage.
+Effect: flag disabled → the tool exists neither in the model catalogue nor in the routing.
 
-### 3.5 `core/features/compaction/mod.rs` — `CompactionTrigger` (ligne 145)
+### 3.5 `core/features/compaction/mod.rs` — `CompactionTrigger` (line 145)
 
 ```rust
 pub(crate) enum CompactionTrigger {
@@ -216,12 +215,11 @@ pub(crate) enum CompactionTrigger {
 }
 ```
 
-Sérialisé en snake_case → `"agent"`.
+Serialised in snake_case → `"agent"`.
 
 ### 3.6 `core/features/compaction/execution.rs`
 
-`CompactionContinuation` (ligne 25) doit transporter le trigger pour le cas « en cours de
-tour » :
+`CompactionContinuation` (line 25) must carry the trigger for the in-turn case:
 
 ```rust
 enum CompactionContinuation {
@@ -230,10 +228,10 @@ enum CompactionContinuation {
 }
 ```
 
-`trigger()` (ligne 85) renvoie simplement le champ. `in_turn_identity()` (ligne 92) ne change
-pas, la paire `(turn_id, iterations)` reste l'identité de reprise.
+`trigger()` (line 85) simply returns the field. `in_turn_identity()` (line 92) is unchanged:
+the `(turn_id, iterations)` pair remains the resume identity.
 
-`CompactionRequest` (ligne 494) :
+`CompactionRequest` (line 494):
 
 ```rust
 pub(crate) enum CompactionRequest<'a> {
@@ -247,20 +245,20 @@ impl<'a> CompactionRequest<'a> {
 }
 ```
 
-`start_compaction` (ligne 512) : la branche `Agent` produit
+`start_compaction` (line 512): the `Agent` branch produces
 `CompactionContinuation::InTurn { turn_id, iterations, trigger: CompactionTrigger::Agent }` —
-donc continuation **dans le tour** (l'agent continue) avec la trace `agent`.
+an **in-turn** continuation (the agent carries on) with the `agent` trace.
 
-`PendingCompaction::in_turn` (ligne 31) passe `trigger: CompactionTrigger::Automatic` pour
-l'autocompaction.
+`PendingCompaction::in_turn` (line 31) passes `trigger: CompactionTrigger::Automatic` for
+auto-compaction.
 
-`compacted()` (ligne 198) est inchangé : l'injection de la note se fait dans `turn.rs` (§3.7),
-pour ne pas faire dépendre le module compaction de l'état de session.
+`compacted()` (line 198) is unchanged: the note is injected from `turn.rs` (§3.7), so the
+compaction module does not depend on session state.
 
 ### 3.7 `core/turn.rs` + `core/state.rs`
 
-Nouvel état (transitoire, comme l'est déjà l'état de compaction : rien de la compaction n'est
-dans le schéma de checkpoint) :
+New state (transient, as compaction state already is: nothing of compaction appears in the
+checkpoint schema):
 
 ```rust
 pub(crate) struct PendingAgentCompaction {
@@ -269,27 +267,29 @@ pub(crate) struct PendingAgentCompaction {
     pub reason: Option<String>,
 }
 
-// dans HarnessState
+// in HarnessState
 pub pending_agent_compaction: Option<PendingAgentCompaction>,
 pub agent_compactions_done: u32,
 pub agent_compaction_baseline_tokens: Option<u64>,
 ```
 
-**(a) Les garde-fous tournent quand le résultat arrive, pas en fin de tour**
+**(a) The guards run when the result arrives, not at the end of the turn**
 
-Décision ferme, et pas cosmétique : si le refus n'intervenait qu'en fin de tour, l'outil aurait
-déjà répondu « accepté » au modèle, qui continuerait en croyant son contexte compacté. Le refus
-doit être un **échec d'outil immédiat**, lu et exploité par le modèle dans le même tour.
+A firm decision, and not cosmetic: if the refusal only happened at the end of the turn, the tool
+would already have answered "accepted" to the model, which would carry on believing its context
+was compacted. The refusal must be an **immediate tool failure**, read and acted upon by the
+model within the same turn.
 
-Point d'insertion : `finish_pending_tool` (`turn.rs:330`). Il a déjà tout — `&mut HarnessState`,
-`call_id`, le batch via `ActivePhase::AwaitingToolBatch`, et le résultat validé (lignes 337-353).
+Insertion point: `finish_pending_tool` (`turn.rs:330`). It already has everything —
+`&mut HarnessState`, `call_id`, the batch via `ActivePhase::AwaitingToolBatch`, and the
+validated result (lines 337-353).
 
 ```rust
 fn finish_pending_tool(state, action_id, call_id, report, determinism) -> … {
-    // … validation existante …
-    let mut result = /* résultat validé */;
+    // … existing validation …
+    let mut result = /* validated result */;
 
-    if let Some(call) = batch.call(&call_id) {          // accesseur à ajouter, cf. plus bas
+    if let Some(call) = batch.call(&call_id) {          // accessor to add, see below
         if call.name == "request_compaction" {
             match admit_agent_compaction(state, settings) {
                 Ok(()) => {
@@ -297,12 +297,12 @@ fn finish_pending_tool(state, action_id, call_id, report, determinism) -> … {
                     state.pending_handoff_note = Some(handoff.handoff_note.clone());
                     state.pending_agent_compaction = Some(PendingAgentCompaction {
                         handoff_note: handoff.handoff_note,
-                        extra_instructions: call.arguments…,   // cf. note ci-dessous
+                        extra_instructions: call.arguments…,   // see note below
                         reason: …,
                     });
                 }
                 Err(refusal) => {
-                    // Le modèle voit le refus tout de suite ; son tour continue.
+                    // The model sees the refusal right away; its turn continues.
                     result = ToolResult::Failure {
                         content: vec![],
                         structured_content: StructuredContent::Absent,
@@ -318,40 +318,42 @@ fn finish_pending_tool(state, action_id, call_id, report, determinism) -> … {
             }
         }
     }
-    // … suite inchangée : finish_tool_batch_action(tools, batch, &action_id, result, …) …
+    // … unchanged: finish_tool_batch_action(tools, batch, &action_id, result, …) …
 }
 ```
 
-Deux détails d'implémentation :
+Two implementation details:
 
-- `ToolBatch` n'expose pas le nom d'un call par `call_id` : ajouter
-  `pub(crate) fn call(&self, call_id: &str) -> Option<&ToolCall>`. Seule addition d'API au
-  module batch — `batch.rs` reste pur et aucune signature existante ne change.
-- `extra_instructions` et `reason` sont dans les **arguments** de l'appel, pas dans le
-  résultat. Les lire depuis `call.arguments` (JSON validé par le schéma) plutôt que de faire
-  confiance au runtime pour les renvoyer.
+- `ToolBatch` does not expose a call's name by `call_id`: add
+  `pub(crate) fn call(&self, call_id: &str) -> Option<&ToolCall>`. This is the only API addition
+  to the batch module — `batch.rs` stays pure and no existing signature changes.
+- `extra_instructions` and `reason` live in the call's **arguments**, not in the result. Read
+  them from `call.arguments` (JSON validated by the schema) rather than trusting the runtime to
+  echo them back.
 
-`parse_handoff` échoue proprement (`CoreError::invalid_command`) si le runtime renvoie un
-`structured_content` non conforme : un runtime ancien ou bogué ne doit pas corrompre l'état.
+`parse_handoff` fails cleanly (`CoreError::invalid_command`) when the runtime returns a
+non-conforming `structured_content`: an old or buggy runtime must not corrupt the state.
 
-**(b) La garde**
+**(b) The guard**
 
 ```rust
 fn admit_agent_compaction(state: &HarnessState, settings: &Settings) -> Result<(), Refusal>
 ```
 
-Sources, toutes déjà présentes :
-- taille estimée du contexte : `estimate_agent_request_tokens(state)` (`request_size.rs:179`) ;
-- croissance depuis la dernière compaction agent : `agent_compaction_baseline_tokens` comparé à
-  `state.last_reported_context_tokens` ;
-- quota : `agent_compactions_done` ;
-- « déjà en attente » : `pending_agent_compaction.is_some()`, et
+Sources, all already present:
+- estimated context size: `estimate_agent_request_tokens(state)` (`request_size.rs:179`);
+- growth since the last agent compaction: `agent_compaction_baseline_tokens` compared against
+  `state.last_reported_context_tokens`;
+- quota: `agent_compactions_done`;
+- "already pending": `pending_agent_compaction.is_some()`, and
   `matches!(state.turn, TurnState::Compacting { .. })`.
 
-Un refus laisse l'état intact : pas de compaction, pas d'intention enregistrée, le tour continue
-normalement.
+A refusal leaves the state intact: no compaction, no recorded intent, the turn continues
+normally.
 
-**(c) Déclenchement** — `orchestration.rs` expose déjà le wrapper d'état `start_manual_compaction(state, extra_instructions)` (ligne 36), qui assemble `generated_system`, `compaction_inputs` et `compaction_count`. On ajoute le jumeau :
+**(c) Triggering** — `orchestration.rs` already exposes the state wrapper
+`start_manual_compaction(state, extra_instructions)` (line 36), which assembles
+`generated_system`, `compaction_inputs` and `compaction_count`. We add its twin:
 
 ```rust
 pub(crate) fn start_agent_compaction(
@@ -364,8 +366,8 @@ pub(crate) fn start_agent_compaction(
 }
 ```
 
-Puis, dans `apply_tool_batch_transition` (`turn.rs:701`), branche
-`ToolBatchResolution::ContinueTurn` (ligne 718), avant `continue_active_turn` :
+Then, in `apply_tool_batch_transition` (`turn.rs:701`), `ToolBatchResolution::ContinueTurn`
+branch (line 718), before `continue_active_turn`:
 
 ```rust
 if let Some(pending) = state.pending_agent_compaction.take() {
@@ -383,17 +385,16 @@ if let Some(pending) = state.pending_agent_compaction.take() {
 }
 ```
 
-Attention à l'ordre : `apply_in_turn_compaction_start` installe
-`ActivePhase::AwaitingCompaction` ; `pending_handoff_note` est posé avant, et doit survivre
-jusqu'à la reprise.
+Mind the order: `apply_in_turn_compaction_start` installs `ActivePhase::AwaitingCompaction`,
+so `pending_handoff_note` is set before it and must survive until the resume.
 
-Note d'implémentation : `turn.rs` importe déjà cette famille de fonctions sous un alias
-(`turn.rs:23`, `start_manual_compaction as start_manual_compaction_request`) parce que le
-fichier a sa propre `fn start_manual_compaction`. Garder la même convention.
+Implementation note: `turn.rs` already imports this family of functions under an alias
+(`turn.rs:23`, `start_manual_compaction as start_manual_compaction_request`) because the file has
+its own `fn start_manual_compaction`. Keep the same convention.
 
-**(d) Réinjection de la note** — `apply_compaction_resolution` (`turn.rs:245`), branche
-`CompactionResolution::ContinueTurn` : si une note agent est en attente, l'injecter avant
-`continue_after_compaction` :
+**(d) Re-injecting the note** — `apply_compaction_resolution` (`turn.rs:245`),
+`CompactionResolution::ContinueTurn` branch: when an agent note is pending, inject it before
+`continue_after_compaction`:
 
 ```rust
 if let Some(note) = state.pending_handoff_note.take() {
@@ -401,154 +402,148 @@ if let Some(note) = state.pending_handoff_note.take() {
 }
 ```
 
-`push_before_next_turn` est déjà utilisé par `handle_context_message` (`turn.rs:761`) pour
-l'injection de contexte : même mécanique, la note entre dans l'historique persisté, juste
-après le résumé. La détruire en cas d'échec de compaction (branche `FailTurn`) : sur échec,
-l'historique d'origine est conservé et la note n'a plus lieu d'être injectée.
+`push_before_next_turn` is already used by `handle_context_message` (`turn.rs:761`) for context
+injection: same mechanics, so the note enters the persisted history right after the summary.
+Drop it when the compaction fails (the `FailTurn` branch): on failure the original history is
+kept and the note has no reason to be injected.
 
-### 3.8 Compaction `BetweenTurns` : inchangée
+### 3.8 `BetweenTurns` compaction: unchanged
 
-`/compact` reste exactement sur son chemin actuel. Seule différence : `trigger()` d'une
-compaction manuelle reste `Manual`.
+`/compact` stays exactly on its current path. Only difference: `trigger()` of a manual
+compaction remains `Manual`.
 
-## 4. Modifications Runtime Python
+## 4. Python Runtime changes
 
 ### 4.1 `harness/runtimes/python/python/mistralai_vibe_local_harness/`
 
-- `protocol.py` :
-  - `RustRuntimeBuiltinToolName` (ligne 34) et `RUNTIME_BUILTIN_TOOL_NAMES` (ligne 61) :
-    ajouter `"request_compaction"`.
-  - Les quatre `Literal["automatic", "manual"]` (lignes 1020, 1408, 1419, 1493) :
-    ajouter `"agent"`.
-  - Ligne 1050, la condition `if self.trigger == "automatic" and self.turn_id is not None`
-    doit inclure `"agent"` : le trigger agent porte aussi un `turn_id` (continuation en cours
-    de tour).
-- `vibe/_agent_compaction.py` — nouveau : exécution de l'outil. Le runtime ne fait **que**
-  lire le fichier et valider les arguments : aucun garde-fou ici (§3.7a), il ne connaît ni les
-  tokens ni le quota.
+- `protocol.py`:
+  - `RustRuntimeBuiltinToolName` (line 34) and `RUNTIME_BUILTIN_TOOL_NAMES` (line 61): add
+    `"request_compaction"`.
+  - The four `Literal["automatic", "manual"]` (lines 1020, 1408, 1419, 1493): add `"agent"`.
+  - Line 1050, the `if self.trigger == "automatic" and self.turn_id is not None` condition must
+    include `"agent"`: the agent trigger also carries a `turn_id` (in-turn continuation).
+- `vibe/_agent_compaction.py` — new: the tool execution. The runtime **only** reads the file and
+  validates the arguments: no guards here (§3.7a), it knows neither the tokens nor the quota.
   ```python
   async def execute_agent_compaction(action, *, config, max_bytes: int) -> Event
   ```
-  - **réutiliser la machinerie existante**, ne pas réécrire une résolution de chemin :
-    `_read_roots(config)`, `_path_policy(…)` et `_is_within(path, roots)` dans
-    `vibe/_file_tools.py:323,339,368` sont exactement les règles de `file_system.read_file`
-    (racines autorisées, symlinks). Une résolution maison divergerait du sandbox.
-  - refuse hors racines, absente, vide, non-régulier — avec un message qui dit d'écrire la note
-    d'abord ;
-  - lit au plus `max_bytes`, tronque proprement (frontière UTF-8), renvoie
+  - **reuse the existing machinery**, do not rewrite path resolution: `_read_roots(config)`,
+    `_path_policy(…)` and `_is_within(path, roots)` in `vibe/_file_tools.py:323,339,368` are
+    exactly the rules of `file_system.read_file` (allowed roots, symlinks). A home-grown
+    resolution would diverge from the sandbox.
+  - refuse outside the roots, missing, empty, non-regular — with a message telling the agent to
+    write the note first;
+  - read at most `max_bytes`, truncate cleanly (UTF-8 boundary), return
     `Success{handoff_note, handoff_bytes, truncated}`.
-- `vibe/_runtime.py` (~ligne 2750, à côté de `execute_model_wait` / `self.sleep`) : un bras de
-  dispatch pour `request_compaction`.
-- `vibe/_hook_matcher.py` (ligne 63) : `"request_compaction": ("request_compaction",)`.
-- `session_api/app_server/session/models/configuration.py` (à côté de la description de
-  `tools.self.sleep`) : exposer le nouveau bloc de settings.
+- `vibe/_runtime.py` (~line 2750, next to `execute_model_wait` / `self.sleep`): a dispatch arm
+  for `request_compaction`.
+- `vibe/_hook_matcher.py` (line 63): `"request_compaction": ("request_compaction",)`.
+- `session_api/app_server/session/models/configuration.py` (next to the `tools.self.sleep`
+  description): expose the new settings block.
 
-### 4.2 `vibe/` (app-server et config)
+### 4.2 `vibe/` (app server and config)
 
-- `vibe/core/config/models.py` : modèle Pydantic `AgentCompactionSettings`
-  (`enabled`, `min_input_tokens`, `max_per_session`, `min_growth_tokens`, `max_handoff_bytes`),
-  branché dans le modèle `Tools` existant.
-- `vibe/core/config/_defaults.py` + `vibe/core/config/vibe_schema.py` : défauts et schéma.
-- `vibe/app_server/_runtime.py` (~1719, là où `model_wait=RustEnabledModelWait()` est posé) :
-  mapper la config vers `RustToolSettings.agent_compaction`.
-- `vibe/app_server/_unified_tool_projection.py` (~1807, à côté de `"self.sleep"`) :
+- `vibe/core/config/models.py`: an `AgentCompactionSettings` Pydantic model (`enabled`,
+  `min_input_tokens`, `max_per_session`, `min_growth_tokens`, `max_handoff_bytes`), wired into
+  the existing `Tools` model.
+- `vibe/core/config/_defaults.py` + `vibe/core/config/vibe_schema.py`: defaults and schema.
+- `vibe/app_server/_runtime.py` (~1719, where `model_wait=RustEnabledModelWait()` is set): map
+  the config to `RustToolSettings.agent_compaction`.
+- `vibe/app_server/_unified_tool_projection.py` (~1807, next to `"self.sleep"`):
   `"request_compaction": _ToolLabel("Compacting", "", "Compacted")`.
-- `vibe/app_server/_session_api_commands.py` : rien à changer ; `compact()` reste la commande
-  manuelle.
+- `vibe/app_server/_session_api_commands.py`: nothing to change; `compact()` stays the manual
+  command.
 
 ### 4.3 `vibe/cli-rust/`
 
-Rien d'obligatoire en v1 : la ligne de statut de compaction est déjà peinte depuis les
-checkpoints, et le trigger n'y est pas affiché. Si on veut expliciter l'origine, c'est
-`ui/transcript/entry/status.rs:21` + un scénario `client-e2e` et son golden. À faire dans un
-second temps.
+Nothing mandatory in v1: the compaction status row is already painted from the checkpoints, and
+the trigger is not displayed there. To surface the origin explicitly, touch
+`ui/transcript/entry/status.rs:21` plus a `client-e2e` scenario and its golden. A second step.
 
 ## 5. Tests
 
-### 5.0 Commandes — attention, `make` ne couvre pas le harness
+### 5.0 Commands — note that `make` does not cover the harness
 
-Le `Makefile` de la racine pilote **uniquement le crate de la TUI**
-(`M = --manifest-path vibe/cli-rust/Cargo.toml`). `make test_rust` ne testera donc *rien* du
-harness. Pour `harness/core` :
+The root `Makefile` drives **only the TUI crate**
+(`M = --manifest-path vibe/cli-rust/Cargo.toml`). `make test_rust` will therefore test *nothing*
+of the harness. For `harness/core`:
 
 ```bash
 cd harness/core
-cargo nextest run          # suite complète (0.9.146 installé)
-cargo test                 # repli si nextest indisponible
+cargo nextest run          # full suite (0.9.146 installed)
+cargo test                 # fallback if nextest is unavailable
 cargo fmt && cargo clippy --all-targets -- -D warnings
 ```
 
-Le crate de la TUI a ses propres règles (`vibe/cli-rust/AGENTS.md`) : `make fmt`, `make lint`,
-`make test_rust` depuis `vibe/`. Ne pas mélanger les deux périmètres.
+The TUI crate has its own rules (`vibe/cli-rust/AGENTS.md`): `make fmt`, `make lint`,
+`make test_rust` from `vibe/`. Do not mix the two scopes.
 
-### 5.1 Conventions de code
+### 5.1 Code conventions
 
-- Code, commentaires, noms de tests et messages de commit en **anglais** : c'est la langue du
-  repo. Seuls `docs/agent-compaction/*.md` sont en français (doc de travail du fork).
-- `harness/core` utilise des modules de test inline (`#[cfg(test)] mod tests`) et
-  `src/tests/acceptance_scenarios/` — c'est acceptable ici. L'interdiction des tests inline
-  ne concerne que `vibe/cli-rust`.
-- Rust : `edition = 2024`, pas de `unwrap()` dans le code de production.
-- Python : `uv run ruff check --fix .`, `uv run ruff format .`, `uv run pyright` (strict) après
-  chaque changement — règle AGENTS.md.
+- Code, comments, test names and commit messages in **English**: that is the repo language.
+- `harness/core` uses inline test modules (`#[cfg(test)] mod tests`) and
+  `src/tests/acceptance_scenarios/` — acceptable here. The ban on inline tests only applies to
+  `vibe/cli-rust`.
+- Rust: `edition = 2024`, no `unwrap()` in production code.
+- Python: `uv run ruff check --fix .`, `uv run ruff format .`, `uv run pyright` (strict) after
+  every change — AGENTS.md rule.
 
-### 5.2 Tests à écrire
+### 5.2 Tests to write
 
-Ordre de priorité, en même temps que le code :
+Priority order, alongside the code:
 
-1. `harness/core/src/tests/acceptance_scenarios/compaction/agent.rs` (nouveau, enregistré dans
-   `compaction/mod.rs`), sur le modèle des fichiers voisins :
-   - plan → handoff → outil → fin de tour → compaction → reprise dans le même tour ;
-   - le contexte après reprise contient résumé **puis** note ;
-   - handoff absent → échec d'outil, aucune compaction, le tour continue ;
-   - sous le plancher → refus ;
-   - quota atteint → refus ;
-   - deux appels même tour → une seule compaction ;
-   - échec de compaction (résumé refusé) → historique d'origine, tour repris ;
-   - flag off → l'outil n'est pas dans le catalogue (`builtin_direct_tools`).
-2. Unitaires core pour `admit_agent_compaction` et `Refusal::message`.
-3. Python : `tests/` miroir pour `_agent_compaction.py` (lecture, troncature, échappement de
-   chemin, fichier vide).
-4. `vibe/` : test de mapping config → settings runtime.
+1. `harness/core/src/tests/acceptance_scenarios/compaction/agent.rs` (new, registered in
+   `compaction/mod.rs`), modelled on the neighbouring files:
+   - plan → handoff → tool → end of turn → compaction → resume within the same turn;
+   - the context after the resume holds the summary **then** the note;
+   - missing handoff → tool failure, no compaction, the turn continues;
+   - below the floor → refusal;
+   - quota reached → refusal;
+   - two calls in the same turn → a single compaction;
+   - compaction failure (summary rejected) → original history, turn resumed;
+   - flag off → the tool is not in the catalogue (`builtin_direct_tools`).
+2. Core unit tests for `admit_agent_compaction` and `Refusal::message`.
+3. Python: mirroring `tests/` for `_agent_compaction.py` (read, truncation, path escape, empty
+   file).
+4. `vibe/`: test for the config → runtime settings mapping.
 
-## 6. Ordre d'implémentation
+## 6. Implementation order
 
-Chaque étape compile et passe ses tests avant la suivante.
+Each step compiles and passes its tests before the next.
 
-1. Settings + **description dans les prompts** + outil déclaré + route, flag off : vérifier que
-   le catalogue est inchangé quand le flag est à `false`.
-2. `CompactionTrigger::Agent` + `CompactionRequest::Agent` + continuation `InTurn` avec
-   trigger, sans outil : brancher un test unitaire qui démarre une compaction agent
-   directement.
-3. Outil actif : schéma, route, exécution runtime (lecture du handoff via `_file_tools`), note
-   renvoyée.
-4. Détection du succès dans `finish_pending_tool` + `PendingAgentCompaction` + accesseur
-   `ToolBatch::call`.
-5. Reprise du tour en fin de tour (`apply_tool_batch_transition`).
-6. Réinjection de la note après le résumé.
-7. `admit_agent_compaction` et les refus — à câbler avant toute utilisation réelle : sans cette
-   étape, l'outil accepte tout.
-8. Config `vibe/` + projection UI.
-9. Acceptance tests complets.
+1. Settings + **description in the prompts** + declared tool + route, flag off: verify the
+   catalogue is unchanged when the flag is `false`.
+2. `CompactionTrigger::Agent` + `CompactionRequest::Agent` + `InTurn` continuation carrying the
+   trigger, without the tool: add a unit test that starts an agent compaction directly.
+3. Tool active: schema, route, runtime execution (handoff read via `_file_tools`), note
+   returned.
+4. Success detection in `finish_pending_tool` + `PendingAgentCompaction` +
+   `ToolBatch::call` accessor.
+5. Turn resume at the end of the turn (`apply_tool_batch_transition`).
+6. Note re-injection after the summary.
+7. `admit_agent_compaction` and the refusals — wire this before any real use: without this
+   step, the tool accepts everything.
+8. `vibe/` config + UI projection.
+9. Full acceptance tests.
 
-Ne pas sauter l'étape 7 avant de tester à la main : un outil qui promet une compaction qu'il
-n'exécute pas est pire que pas d'outil du tout.
+Do not skip step 7 before testing by hand: a tool that promises a compaction it never performs
+is worse than no tool at all.
 
-## 7. Deux commandes côte à côte : `vibe` et `vibe-fork`
+## 7. Two commands side by side: `vibe` and `vibe-fork`
 
-Contrainte : `vibe` doit continuer à lancer le Vibe officiel. Le fork s'installe donc sous un
-second nom.
+Constraint: `vibe` must keep launching the official Vibe. The fork therefore installs under a
+second name.
 
-`[project.scripts]` expose `vibe-fork = "vibe.cli.launcher:main"` — même point d'entrée,
-ajout purement additif. Le launcher est agnostique au nom : il ne lit pas `argv[0]` pour
-choisir le binaire mais le résout depuis le paquet (`launcher.py:68`), et cherche l'app-server
-comme **voisin de `sys.argv[0]` résolu** (`launcher.py:88`). Une entrée `vibe-fork` installée
-dans un venv dédié est donc autonome : elle trouve son `vibe-app-server` dans le même `bin/`.
+`[project.scripts]` exposes `vibe-fork = "vibe.cli.launcher:main"` — same entry point, a purely
+additive change. The launcher is name-agnostic: it does not read `argv[0]` to pick the binary
+but resolves it from the package (`launcher.py:68`), and looks for the app server as a
+**sibling of the resolved `sys.argv[0]`** (`launcher.py:88`). A `vibe-fork` entry installed in
+its own venv is therefore self-contained: it finds its `vibe-app-server` in the same `bin/`.
 
 ### Installation
 
-Ne **pas** utiliser `uv tool install` : il écrirait aussi `vibe` dans `~/.local/bin` et
-remplacerait l'officiel. Venv dédié, puis un seul lien symbolique :
+Do **not** use `uv tool install`: it would also write `vibe` into `~/.local/bin` and replace the
+official one. A dedicated venv, then a single symlink:
 
 ```bash
 uv venv ~/.vibe-fork/venv
@@ -556,57 +551,74 @@ uv pip install --python ~/.vibe-fork/venv/bin/python /Users/valentin/Code/Tests/
 ln -sfn ~/.vibe-fork/venv/bin/vibe-fork ~/.local/bin/vibe-fork
 ```
 
-`vibe` reste l'officiel, `vibe-fork` lance le fork. Après une modification Rust, relancer les
-deux premières lignes.
+`vibe` stays the official one, `vibe-fork` launches the fork. After a Rust change, rerun the
+first two lines.
 
-### Développement
+### Development
 
 ```bash
 uv sync --all-extras
-uv run vibe     # dans le repo, sans rien installer sur le PATH
+uv run vibe     # inside the repo, installing nothing on the PATH
 ```
 
-Le build Python (`build_backend/maturin_backend.py`) compile **les deux** binaires Rust :
-l'extension du harness (`harness/core` → `mistralai_vibe_local_harness._native`) et la TUI
-(`vibe/cli-rust` → `vibe/_bin/vibe-rs`). Sans `cargo`, échec explicite
+The Python build (`build_backend/maturin_backend.py`) compiles **both** Rust binaries: the
+harness extension (`harness/core` → `mistralai_vibe_local_harness._native`) and the TUI
+(`vibe/cli-rust` → `vibe/_bin/vibe-rs`). Without `cargo` it fails explicitly
 (`maturin_backend.py:101`).
 
-Build non éditable assumé : chaque changement Rust exige de toute façon une recompilation,
-autant la déclencher explicitement plutôt qu'à l'import.
+A non-editable build is assumed: every Rust change requires a rebuild anyway, so trigger it
+explicitly rather than at import time.
 
-### Toolchain (installé, vérifié)
+### Toolchain (installed, verified)
 
-| Élément | Version |
+| Item | Version |
 |---|---|
-| `rustc` / `cargo` | 1.97.1 aarch64-apple-darwin, profil minimal |
-| composants | `rustfmt`, `clippy`, `llvm-tools` |
-| `cargo-nextest` | 0.9.146 (prébuilt, version épinglée par AGENTS.md) |
-| `uv` | 0.11.7 (déjà présent) |
+| `rustc` / `cargo` | 1.97.1 aarch64-apple-darwin, minimal profile |
+| components | `rustfmt`, `clippy`, `llvm-tools` |
+| `cargo-nextest` | 0.9.146 (prebuilt, the version pinned by AGENTS.md) |
+| `uv` | 0.11.7 (already present) |
 
-Installé via `rustup` avec `--no-modify-path` : `$HOME/.cargo/bin` n'est pas dans le `PATH`
-global. Pour appeler `cargo` directement, `source "$HOME/.cargo/env"`.
+Installed through `rustup` with `--no-modify-path`: `$HOME/.cargo/bin` is not on the global
+`PATH`. To call `cargo` directly, `source "$HOME/.cargo/env"`.
 
-### Config partagée
+### Shared config
 
-Les deux commandes lisent le même `~/.vibe/config.toml` : clé API, modèles et thème communs,
-rien à dupliquer.
+Both commands read the same `~/.vibe/config.toml`: API key, models and theme are shared, nothing
+to duplicate.
 
 ```toml
 [tools.agent_compaction]
 enabled = true
 ```
 
-Conséquence à connaître : le Vibe officiel ne connaît pas cette section. Il ne plante pas —
-le schéma tolère les clés inconnues (`extra="ignore"`, cf. le commentaire de
-`config/models.py:107`) — mais il affiche « Config setting ignored : tools.agent_compaction »
-(`vibe_schema.py:489`). Avec `strict_config = true`, c'est en revanche une erreur de
-chargement. Si la gêne devient réelle, la sortie est un `VIBE_HOME` distinct pour le fork, à
-trancher le moment venu.
+A consequence to be aware of: the official Vibe does not know this section. It does not crash —
+the schema tolerates unknown keys (`extra="ignore"`, cf. the comment in `config/models.py:107`)
+— but it prints "Config setting ignored: tools.agent_compaction" (`vibe_schema.py:489`). With
+`strict_config = true` it becomes a config-load error instead. If the noise becomes real, the
+way out is a separate `VIBE_HOME` for the fork; to be decided when it matters.
 
-## 8. Workflow fork / upstream
+### Authentication and billing
 
-Déjà en place : `origin` = `ValentinMalassigne/mistral-vibe`, `upstream` =
-`mistralai/mistral-vibe`, branche `feat/agent-compact` sur `main` @ v3.1.0.
+The fork resolves credentials through the same code path as the official build
+(`vibe/utils/api_keys.py:92`), in the same order: stored OIDC login, then session credentials,
+then `MISTRAL_API_KEY`, then the keyring. Same account, same API base URL, same billing
+endpoints (`/v1/billing/subscription`, `/v1/billing/budget`). Nothing identifies the fork as a
+distinct client, so usage is attributed and debited exactly as with the official Vibe. Which
+meter is used — Vibe plan allowance through the OIDC login, or platform API usage through an
+API key — depends on which credential you already use today, and the fork does not change that.
+
+### Auto-update
+
+The user's config may have `enable_auto_update = true`. The updater acts through
+`uv tool upgrade mistral-vibe` / `uv tool install mistral-vibe` (`update_flow.rs:94`), i.e. it
+only ever targets a uv tool install of the *official* package. The fork lives in its own venv
+and is not a uv tool, so it cannot update itself — and the official `vibe` is untouched. The
+only annoyance is an update prompt that offers the official build; nothing destructive.
+
+## 8. Fork / upstream workflow
+
+Already in place: `origin` = `ValentinMalassigne/mistral-vibe`, `upstream` =
+`mistralai/mistral-vibe`, branch `feat/agent-compact` on `main` @ v3.1.0.
 
 ```bash
 git fetch upstream && git checkout main && git merge --ff-only upstream/main
@@ -614,34 +626,33 @@ git push origin main
 git checkout feat/agent-compact && git rebase main
 ```
 
-Le diff touche ~10 fichiers Rust et ~6 Python, tous localisés. Le risque n'est pas la taille
-mais le point d'accroche `apply_tool_batch_transition` et `CompactionContinuation`, qui sont
-du code actif.
+The diff touches ~10 Rust files and ~6 Python files, all localised. The risk is not the size but
+the `apply_tool_batch_transition` hook and `CompactionContinuation`, which are active code.
 
-L'entrée `vibe-fork` de `[project.scripts]` est une commodité **propre au fork** : à retirer
-si on ouvre une PR upstream, elle n'a de sens que pour faire cohabiter les deux commandes.
+The `vibe-fork` entry in `[project.scripts]` is a **fork-only** convenience: remove it if you
+open an upstream PR, since it only exists to let the two commands coexist.
 
-## 9. Estimation
+## 9. Estimate
 
-| Étape | Volume |
+| Step | Volume |
 |---|---|
-| Settings + outil + route | ~120 lignes Rust |
-| Trigger + `CompactionRequest::Agent` | ~60 lignes Rust |
-| État + détection + reprise + note | ~150 lignes Rust |
-| Garde-fous | ~100 lignes Rust |
-| Runtime Python (exécution + protocole) | ~120 lignes Python |
-| Config app-server + projection | ~80 lignes Python |
-| Tests | ~400 lignes |
+| Settings + tool + route | ~120 lines Rust |
+| Trigger + `CompactionRequest::Agent` | ~60 lines Rust |
+| State + detection + resume + note | ~150 lines Rust |
+| Guards | ~100 lines Rust |
+| Python runtime (execution + protocol) | ~120 lines Python |
+| App server config + projection | ~80 lines Python |
+| Tests | ~400 lines |
 
-Total ~1 000 lignes, dont la moitié de tests. 10 fichiers Rust, 6 Python.
+About 1,000 lines in total, half of it tests. 10 Rust files, 6 Python files.
 
-## 10. Risques
+## 10. Risks
 
-| Risque | Mitigation |
+| Risk | Mitigation |
 |---|---|
-| Conflit upstream sur `turn.rs` / `compaction/execution.rs` | diff minimal, rebase fréquent, pas de refactor opportuniste |
-| Reprise après compaction mal ordonnée (note avant/après résumé) | test d'acceptance dédié sur l'ordre du contexte |
-| Boucle de compactions | croissance minimale + quota, pas seulement le quota |
-| Note trop grosse | borne en octets, troncature signalée au modèle (`truncated: true`) |
-| Modèle qui appelle l'outil sans handoff | paramètre requis + refus actionnable, le modèle se corrige |
-| État transitoire perdu à la reprise d'une session | assumé : l'état de compaction n'est déjà pas checkpointé ; le résultat d'outil, si |
+| Upstream conflict on `turn.rs` / `compaction/execution.rs` | minimal diff, frequent rebases, no opportunistic refactor |
+| Badly ordered resume (note before or after the summary) | dedicated acceptance test on the context order |
+| Compaction loop | minimum growth plus quota, not the quota alone |
+| Oversized note | byte bound, truncation reported to the model (`truncated: true`) |
+| Model calling the tool without a handoff | required parameter + actionable refusal, the model corrects itself |
+| Transient state lost on session resume | accepted: compaction state is not checkpointed either; so is the tool result |
