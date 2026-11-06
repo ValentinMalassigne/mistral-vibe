@@ -167,3 +167,94 @@ fn a_note_the_runtime_cannot_read_compacts_nothing() {
     // Assert
     assert_eq!(resumed["purpose"], "agent");
 }
+
+///
+/// *Prepare*: One batch holds two requests, and the Runtime reads both notes.
+/// *Do*: Return both results in batch order.
+/// *Assert*: The first is recorded, the second is refused as already scheduled,
+/// and a single compaction runs when the Turn ends.
+///
+#[test]
+fn a_second_request_in_the_same_batch_is_refused() {
+    // Prepare
+    let turn_id = "agent-compaction-twice";
+    let mut runtime = SynchronousRuntime::new(agent_compaction_config());
+    let completion = runtime.start_turn(turn_id, &large_text("work"));
+    let calls = vec![
+        tool_call(
+            "first",
+            "request_compaction",
+            json!({"handoff_path": "first.md"}),
+        ),
+        tool_call(
+            "second",
+            "request_compaction",
+            json!({"handoff_path": "second.md"}),
+        ),
+    ];
+    let actions = runtime
+        .apply(
+            tool_call_completion(action_id(&completion), calls.clone()),
+            running(turn_id)
+                .observe(assistant_tool_calls_committed(turn_id, &completion, &calls))
+                .dispatch(runtime_tool(
+                    "request_compaction",
+                    json!({"handoff_path": "first.md"}),
+                ))
+                .dispatch(runtime_tool(
+                    "request_compaction",
+                    json!({"handoff_path": "second.md"}),
+                ))
+                .observe(tool_execution_started(turn_id, "first"))
+                .observe(tool_execution_started(turn_id, "second")),
+        )
+        .actions();
+    let (first, second) = (actions[0].clone(), actions[1].clone());
+
+    // Do
+    let first_result = structured_tool_success(
+        &first,
+        json!({
+            "handoff_note": note(),
+            "handoff_bytes": note().len(),
+            "truncated": false,
+        }),
+    );
+    runtime.apply(
+        first_result.clone(),
+        running(turn_id)
+            .keep(&second)
+            .observe_completed_tool_result(&first, &first_result),
+    );
+    let second_result = structured_tool_success(
+        &second,
+        json!({
+            "handoff_note": note(),
+            "handoff_bytes": note().len(),
+            "truncated": false,
+        }),
+    );
+    let refused = json!({
+        "type": "failure",
+        "content": [],
+        "error": {
+            "code": "tool_failed",
+            "message": "Nothing was compacted: this Turn already has a compaction \
+                        scheduled. Do not call this tool again; end your Turn.",
+            "retryable": false,
+            "details": null,
+        },
+    });
+    let compaction = runtime
+        .apply(
+            second_result,
+            running(turn_id)
+                .dispatch(compaction_call("agent", 1, 1))
+                .observe(tool_result_committed(turn_id, &second, refused.clone()))
+                .observe_tool_execution_finished("second", refused),
+        )
+        .only_action();
+
+    // Assert
+    assert_eq!(compaction["trigger"], "agent");
+}

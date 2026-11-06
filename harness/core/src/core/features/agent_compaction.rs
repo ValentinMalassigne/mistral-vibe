@@ -183,3 +183,50 @@ fn bounded(note: &str) -> (String, bool) {
     }
     (note[..end].to_string(), true)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_refusal_tells_the_model_nothing_was_compacted() {
+        let refusals = [
+            Refusal::BelowFloor {
+                estimated: 1,
+                floor: 2,
+            },
+            Refusal::InsufficientGrowth {
+                grown: 1,
+                required: 2,
+            },
+            Refusal::QuotaReached { done: 8, max: 8 },
+            Refusal::AlreadyPending,
+        ];
+        for refusal in refusals {
+            let message = refusal.message();
+            assert!(
+                message.starts_with("Nothing was compacted"),
+                "{message} says the request had no effect"
+            );
+            assert!(message.len() > 40, "{message} tells the model what to do");
+        }
+    }
+
+    #[test]
+    fn a_note_within_the_bound_is_kept_whole() {
+        let note = "a short note";
+        assert_eq!(bounded(note), (note.to_string(), false));
+    }
+
+    #[test]
+    fn a_note_over_the_bound_is_cut_on_a_character_boundary() {
+        // Two bytes each, so the bound falls inside a character.
+        let note = "é".repeat(MAX_HANDOFF_BYTES as usize);
+        let (kept, cut) = bounded(&note);
+
+        assert!(cut);
+        assert!(kept.len() <= MAX_HANDOFF_BYTES as usize);
+        assert!(note.starts_with(&kept));
+        assert!(kept.chars().all(|character| character == 'é'));
+    }
+}
