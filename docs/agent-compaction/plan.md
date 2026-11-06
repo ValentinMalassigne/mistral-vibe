@@ -8,6 +8,11 @@ fonctionnalité ajoutée s'aligne sur l'existant (défauts, nommage, structure, 
 d'imposer ses propres choix. En cas de conflit réel entre ce qu'on veut et la convention, on
 le remonte et on ne tranche pas unilatéralement.
 
+À lire avant de coder (le repo l'exige pour toute capacité agent) : `AGENTS.md` à la racine,
+et les ADR [0002](../../docs/adr/0002-core-engine-and-delivery-surfaces.md) (propriété
+Core/Runtime), [0004](../../docs/adr/0004-typed-permissioned-tools.md) (contrat des outils) et
+[0018](../../docs/adr/0018-modular-app-server-capabilities.md) (nouvelle capacité).
+
 ## 1. Architecture réelle (et ce que le handoff supposait de travers)
 
 ```
@@ -123,7 +128,9 @@ impl Refusal {
     pub(crate) fn message(&self) -> String { /* … */ }
 }
 
-pub(crate) fn tool(settings: &Settings) -> ToolDefinition { /* schéma JSON ci-dessous */ }
+pub(crate) fn tool(description: &str, settings: &Settings) -> ToolDefinition {
+    /* schéma JSON ci-dessous ; `description` vient des prompts, cf. §3.1b */
+}
 ```
 
 Schéma de l'outil :
@@ -140,6 +147,29 @@ Schéma de l'outil :
   "required": ["handoff_path"]
 }
 ```
+
+### 3.1b La description de l'outil va dans les prompts — convention du repo
+
+`wait` ne code pas sa description en dur : elle est dans
+`core/prompt/default_prompts.json` et surchargeable par `settings.prompts.wait_description`.
+On suit la même règle, sinon l'outil sera le seul du catalogue à ne pas être personnalisable
+(`prompt/settings.rs:38`). Quatre points de contact en plus :
+
+1. `core/prompt/default_prompts.json` : entrée `request_compaction_description` (texte anglais,
+   même ton que `wait_description`).
+2. `core/prompt/settings.rs` : champ `pub request_compaction_description: String` dans
+   `PromptSettings`.
+3. `PromptSettings::tool_text_changed` (ligne 62) : ajouter la comparaison — sans quoi un
+   changement de description ne révoque pas le catalogue d'outils.
+4. `PromptSettings::validate` (ligne 70) : ajouter la paire au contrôle « prompt non vide ».
+
+Texte proposé (anglais, à placer dans `default_prompts.json`) :
+
+> Compact the conversation to free context. Use it when your current plan says to compact
+> before continuing, or when you are about to start a long phase that needs room. Before
+> calling it, write what must survive the compaction (decisions taken, files touched,
+> remaining steps) to `handoff_path`. The compaction runs when your turn ends and the
+> conversation resumes right after, with your handoff note re-injected.
 
 ### 3.2 `core/config.rs` — `ToolSettings` (ligne 277)
 
@@ -168,7 +198,9 @@ rebuildés ensemble dans le fork. Pour une PR upstream, la direction compatible 
 
 Deux insertions, exactement au même endroit que `wait` :
 
-- `builtin_direct_tools` (ligne 215) : si `is_offered()`, `tools.push(agent_compaction::tool(..))`.
+- `builtin_direct_tools` (ligne 215) : si `is_offered()`,
+  `tools.push(agent_compaction::tool(&config.settings.prompts.request_compaction_description, &config.settings.tools.agent_compaction))`
+  — même forme que l'appel à `model_wait::tool` juste au-dessus.
 - `direct_routes` (ligne 27) : si `is_offered()`, route `"request_compaction"` vers
   `ToolTarget::RuntimeBuiltin { name: AgentCompactionRequest }`.
 
@@ -243,34 +275,81 @@ pub agent_compactions_done: u32,
 pub agent_compaction_baseline_tokens: Option<u64>,
 ```
 
-**(a) Détection du succès de l'outil** — dans `finish_tool_batch_action`
-(`tools/execution/batch.rs:481`), branche `ToolExecutionState::Direct` : après
-`finalize_tool_result`, si `call.name == "request_compaction"` et résultat `Success`,
-désérialiser `HandoffReply` depuis `structured_content` et remplir l'état. Un `Failure` ne
-met rien en attente.
+**(a) Les garde-fous tournent quand le résultat arrive, pas en fin de tour**
 
-Signature : la fonction prend déjà `tools: ToolContext<'_>`, il faut lui passer un accès
-mutable à l'état. Deux options, à trancher à l'implémentation :
-- remonter la note via `ToolBatchTransition` (un champ `agent_compaction: Option<…>`),
-  puis l'installer dans `apply_tool_batch_transition`. **Préféré** : garde `batch.rs` pur,
-  sans `&mut HarnessState`.
-- ou passer `&mut HarnessState`.
+Décision ferme, et pas cosmétique : si le refus n'intervenait qu'en fin de tour, l'outil aurait
+déjà répondu « accepté » au modèle, qui continuerait en croyant son contexte compacté. Le refus
+doit être un **échec d'outil immédiat**, lu et exploité par le modèle dans le même tour.
 
-**(b) Garde-fous** — nouvelle fonction, appelée au moment de l'installation :
+Point d'insertion : `finish_pending_tool` (`turn.rs:330`). Il a déjà tout — `&mut HarnessState`,
+`call_id`, le batch via `ActivePhase::AwaitingToolBatch`, et le résultat validé (lignes 337-353).
+
+```rust
+fn finish_pending_tool(state, action_id, call_id, report, determinism) -> … {
+    // … validation existante …
+    let mut result = /* résultat validé */;
+
+    if let Some(call) = batch.call(&call_id) {          // accesseur à ajouter, cf. plus bas
+        if call.name == "request_compaction" {
+            match admit_agent_compaction(state, settings) {
+                Ok(()) => {
+                    let handoff = parse_handoff(&result)?;   // HandoffReply ← structured_content
+                    state.pending_handoff_note = Some(handoff.handoff_note.clone());
+                    state.pending_agent_compaction = Some(PendingAgentCompaction {
+                        handoff_note: handoff.handoff_note,
+                        extra_instructions: call.arguments…,   // cf. note ci-dessous
+                        reason: …,
+                    });
+                }
+                Err(refusal) => {
+                    // Le modèle voit le refus tout de suite ; son tour continue.
+                    result = ToolResult::Failure {
+                        content: vec![],
+                        structured_content: StructuredContent::Absent,
+                        meta: None,
+                        error: ProtocolError {
+                            code: "tool_failed".to_string(),
+                            message: refusal.message(),
+                            retryable: false,
+                            details: None,
+                        },
+                    };
+                }
+            }
+        }
+    }
+    // … suite inchangée : finish_tool_batch_action(tools, batch, &action_id, result, …) …
+}
+```
+
+Deux détails d'implémentation :
+
+- `ToolBatch` n'expose pas le nom d'un call par `call_id` : ajouter
+  `pub(crate) fn call(&self, call_id: &str) -> Option<&ToolCall>`. Seule addition d'API au
+  module batch — `batch.rs` reste pur et aucune signature existante ne change.
+- `extra_instructions` et `reason` sont dans les **arguments** de l'appel, pas dans le
+  résultat. Les lire depuis `call.arguments` (JSON validé par le schéma) plutôt que de faire
+  confiance au runtime pour les renvoyer.
+
+`parse_handoff` échoue proprement (`CoreError::invalid_command`) si le runtime renvoie un
+`structured_content` non conforme : un runtime ancien ou bogué ne doit pas corrompre l'état.
+
+**(b) La garde**
 
 ```rust
 fn admit_agent_compaction(state: &HarnessState, settings: &Settings) -> Result<(), Refusal>
 ```
 
-Sources de mesure, déjà disponibles :
-- taille estimée du contexte : `estimate_agent_request_tokens(state)` (`request_size.rs`) ;
-- croissance depuis la dernière compaction agent : différence avec
-  `agent_compaction_baseline_tokens`, alimenté par `state.last_reported_context_tokens` ;
+Sources, toutes déjà présentes :
+- taille estimée du contexte : `estimate_agent_request_tokens(state)` (`request_size.rs:179`) ;
+- croissance depuis la dernière compaction agent : `agent_compaction_baseline_tokens` comparé à
+  `state.last_reported_context_tokens` ;
 - quota : `agent_compactions_done` ;
-- « déjà en attente » : `pending_agent_compaction.is_some()` ou
+- « déjà en attente » : `pending_agent_compaction.is_some()`, et
   `matches!(state.turn, TurnState::Compacting { .. })`.
 
-Un refus laisse l'état intact : pas de compaction, le tour continue normalement.
+Un refus laisse l'état intact : pas de compaction, pas d'intention enregistrée, le tour continue
+normalement.
 
 **(c) Déclenchement** — `orchestration.rs` expose déjà le wrapper d'état `start_manual_compaction(state, extra_instructions)` (ligne 36), qui assemble `generated_system`, `compaction_inputs` et `compaction_count`. On ajoute le jumeau :
 
@@ -344,15 +423,20 @@ compaction manuelle reste `Manual`.
   - Ligne 1050, la condition `if self.trigger == "automatic" and self.turn_id is not None`
     doit inclure `"agent"` : le trigger agent porte aussi un `turn_id` (continuation en cours
     de tour).
-- `vibe/_agent_compaction.py` — nouveau : exécution de l'outil.
+- `vibe/_agent_compaction.py` — nouveau : exécution de l'outil. Le runtime ne fait **que**
+  lire le fichier et valider les arguments : aucun garde-fou ici (§3.7a), il ne connaît ni les
+  tokens ni le quota.
   ```python
-  async def execute_agent_compaction(action, *, workspace: Path, max_bytes: int) -> Event
+  async def execute_agent_compaction(action, *, config, max_bytes: int) -> Event
   ```
-  - résout `handoff_path` contre le workspace ; refuse les échappements (`..`, absolu hors
-    workspace, symlink sortant) ;
-  - refuse absente / vide / non-régulier, avec un message qui dit d'écrire la note d'abord ;
-  - lit au plus `max_bytes`, tronque proprement (UTF-8), renvoie
-    `Success{accepted, handoff_note, handoff_bytes, truncated}`.
+  - **réutiliser la machinerie existante**, ne pas réécrire une résolution de chemin :
+    `_read_roots(config)`, `_path_policy(…)` et `_is_within(path, roots)` dans
+    `vibe/_file_tools.py:323,339,368` sont exactement les règles de `file_system.read_file`
+    (racines autorisées, symlinks). Une résolution maison divergerait du sandbox.
+  - refuse hors racines, absente, vide, non-régulier — avec un message qui dit d'écrire la note
+    d'abord ;
+  - lit au plus `max_bytes`, tronque proprement (frontière UTF-8), renvoie
+    `Success{handoff_note, handoff_bytes, truncated}`.
 - `vibe/_runtime.py` (~ligne 2750, à côté de `execute_model_wait` / `self.sleep`) : un bras de
   dispatch pour `request_compaction`.
 - `vibe/_hook_matcher.py` (ligne 63) : `"request_compaction": ("request_compaction",)`.
@@ -381,7 +465,36 @@ second temps.
 
 ## 5. Tests
 
-Ordre de priorité, à écrire en même temps que le code :
+### 5.0 Commandes — attention, `make` ne couvre pas le harness
+
+Le `Makefile` de la racine pilote **uniquement le crate de la TUI**
+(`M = --manifest-path vibe/cli-rust/Cargo.toml`). `make test_rust` ne testera donc *rien* du
+harness. Pour `harness/core` :
+
+```bash
+cd harness/core
+cargo nextest run          # suite complète (0.9.146 installé)
+cargo test                 # repli si nextest indisponible
+cargo fmt && cargo clippy --all-targets -- -D warnings
+```
+
+Le crate de la TUI a ses propres règles (`vibe/cli-rust/AGENTS.md`) : `make fmt`, `make lint`,
+`make test_rust` depuis `vibe/`. Ne pas mélanger les deux périmètres.
+
+### 5.1 Conventions de code
+
+- Code, commentaires, noms de tests et messages de commit en **anglais** : c'est la langue du
+  repo. Seuls `docs/agent-compaction/*.md` sont en français (doc de travail du fork).
+- `harness/core` utilise des modules de test inline (`#[cfg(test)] mod tests`) et
+  `src/tests/acceptance_scenarios/` — c'est acceptable ici. L'interdiction des tests inline
+  ne concerne que `vibe/cli-rust`.
+- Rust : `edition = 2024`, pas de `unwrap()` dans le code de production.
+- Python : `uv run ruff check --fix .`, `uv run ruff format .`, `uv run pyright` (strict) après
+  chaque changement — règle AGENTS.md.
+
+### 5.2 Tests à écrire
+
+Ordre de priorité, en même temps que le code :
 
 1. `harness/core/src/tests/acceptance_scenarios/compaction/agent.rs` (nouveau, enregistré dans
    `compaction/mod.rs`), sur le modèle des fichiers voisins :
@@ -402,16 +515,24 @@ Ordre de priorité, à écrire en même temps que le code :
 
 Chaque étape compile et passe ses tests avant la suivante.
 
-1. Settings + outil déclaré + route, flag off : vérifier que le catalogue est inchangé.
+1. Settings + **description dans les prompts** + outil déclaré + route, flag off : vérifier que
+   le catalogue est inchangé quand le flag est à `false`.
 2. `CompactionTrigger::Agent` + `CompactionRequest::Agent` + continuation `InTurn` avec
    trigger, sans outil : brancher un test unitaire qui démarre une compaction agent
    directement.
-3. Outil actif : schéma, route, exécution runtime, note lue et renvoyée.
-4. Détection du succès + `PendingAgentCompaction` + reprise en fin de tour.
-5. Réinjection de la note après le résumé.
-6. Garde-fous.
-7. Config `vibe/` + projection UI.
-8. Acceptance tests complets.
+3. Outil actif : schéma, route, exécution runtime (lecture du handoff via `_file_tools`), note
+   renvoyée.
+4. Détection du succès dans `finish_pending_tool` + `PendingAgentCompaction` + accesseur
+   `ToolBatch::call`.
+5. Reprise du tour en fin de tour (`apply_tool_batch_transition`).
+6. Réinjection de la note après le résumé.
+7. `admit_agent_compaction` et les refus — à câbler avant toute utilisation réelle : sans cette
+   étape, l'outil accepte tout.
+8. Config `vibe/` + projection UI.
+9. Acceptance tests complets.
+
+Ne pas sauter l'étape 7 avant de tester à la main : un outil qui promet une compaction qu'il
+n'exécute pas est pire que pas d'outil du tout.
 
 ## 7. Deux commandes côte à côte : `vibe` et `vibe-fork`
 

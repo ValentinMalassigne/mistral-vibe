@@ -125,12 +125,15 @@ Résultat structuré renvoyé au core par le runtime :
 
 ```json
 {
-  "accepted": true,
   "handoff_note": "<contenu du fichier, borné>",
   "handoff_bytes": 1234,
   "truncated": false
 }
 ```
+
+Pas de champ « accepted » : le runtime ne décide de rien, il lit le fichier et le passe. C'est
+le core qui accepte ou refuse, immédiatement, pour que le modèle voie le refus dans le même
+tour.
 
 En cas de refus, l'outil retourne un échec (`Failure`) et **rien n'est mis en attente** :
 fichier absent ou vide, chemin hors workspace, flag désactivé, garde-fou de contexte, quota
