@@ -233,6 +233,7 @@ fn awaiting_state(compaction: Option<CompactionFixturePhase>) -> HarnessState {
                 crate::core::action_id::compaction("checkpoint-fixture-task", 3),
                 turn_id.clone(),
                 iterations,
+                CompactionTrigger::Automatic,
                 projection,
             ),
         },

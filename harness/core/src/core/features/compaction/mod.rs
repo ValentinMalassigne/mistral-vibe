@@ -145,6 +145,8 @@ pub(crate) enum CompactionPolicy {
 pub(crate) enum CompactionTrigger {
     Manual,
     Automatic,
+    /// The model asked for it with `request_compaction`.
+    Agent,
 }
 
 #[cfg(test)]

@@ -23,8 +23,14 @@ pub(crate) struct PendingCompaction {
 
 #[derive(Clone, Debug, PartialEq)]
 enum CompactionContinuation {
-    InTurn { turn_id: String, iterations: u32 },
-    BetweenTurns { trigger: CompactionTrigger },
+    InTurn {
+        turn_id: String,
+        iterations: u32,
+        trigger: CompactionTrigger,
+    },
+    BetweenTurns {
+        trigger: CompactionTrigger,
+    },
 }
 
 impl PendingCompaction {
@@ -32,6 +38,7 @@ impl PendingCompaction {
         compaction_id: String,
         turn_id: String,
         iterations: u32,
+        trigger: CompactionTrigger,
         projection: CompactionProjection,
     ) -> Self {
         Self::from_parts(
@@ -39,6 +46,7 @@ impl PendingCompaction {
             CompactionContinuation::InTurn {
                 turn_id,
                 iterations,
+                trigger,
             },
             projection,
         )
@@ -84,7 +92,7 @@ impl PendingCompaction {
 
     pub(crate) fn trigger(&self) -> CompactionTrigger {
         match &self.continuation {
-            CompactionContinuation::InTurn { .. } => CompactionTrigger::Automatic,
+            CompactionContinuation::InTurn { trigger, .. } => *trigger,
             CompactionContinuation::BetweenTurns { trigger } => *trigger,
         }
     }
@@ -94,6 +102,7 @@ impl PendingCompaction {
             CompactionContinuation::InTurn {
                 turn_id,
                 iterations,
+                ..
             } => Some((turn_id, *iterations)),
             CompactionContinuation::BetweenTurns { .. } => None,
         }
@@ -492,8 +501,20 @@ fn fail_compaction_attempt(
 }
 
 pub(crate) enum CompactionRequest<'a> {
-    Automatic { turn_id: &'a str, iterations: u32 },
-    Manual { extra_instructions: &'a str },
+    Automatic {
+        turn_id: &'a str,
+        iterations: u32,
+    },
+    Manual {
+        extra_instructions: &'a str,
+    },
+    /// The model compacted its own Turn: the Turn resumes afterwards, like an
+    /// automatic compaction, and the request may carry its own instructions.
+    Agent {
+        turn_id: &'a str,
+        iterations: u32,
+        extra_instructions: &'a str,
+    },
 }
 
 impl<'a> CompactionRequest<'a> {
@@ -506,6 +527,14 @@ impl<'a> CompactionRequest<'a> {
 
     pub(crate) fn manual(extra_instructions: &'a str) -> Self {
         Self::Manual { extra_instructions }
+    }
+
+    pub(crate) fn agent(turn_id: &'a str, iterations: u32, extra_instructions: &'a str) -> Self {
+        Self::Agent {
+            turn_id,
+            iterations,
+            extra_instructions,
+        }
     }
 }
 
@@ -525,8 +554,21 @@ pub(crate) fn start_compaction(
             CompactionContinuation::InTurn {
                 turn_id: turn_id.to_string(),
                 iterations,
+                trigger: CompactionTrigger::Automatic,
             },
             "",
+        ),
+        CompactionRequest::Agent {
+            turn_id,
+            iterations,
+            extra_instructions,
+        } => (
+            CompactionContinuation::InTurn {
+                turn_id: turn_id.to_string(),
+                iterations,
+                trigger: CompactionTrigger::Agent,
+            },
+            extra_instructions,
         ),
         CompactionRequest::Manual { extra_instructions } => (
             CompactionContinuation::BetweenTurns {

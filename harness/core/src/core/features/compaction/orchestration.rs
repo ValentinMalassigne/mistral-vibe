@@ -40,6 +40,20 @@ pub(crate) fn start_manual_compaction(
     start(state, CompactionRequest::manual(extra_instructions))
 }
 
+/// The model compacted its own Turn: the continuation is the in-turn one, so
+/// the Turn resumes with the summary, exactly as after an automatic compaction.
+pub(crate) fn start_agent_compaction(
+    state: &mut HarnessState,
+    turn_id: &str,
+    iterations: u32,
+    extra_instructions: &str,
+) -> Result<CompactionStartResolution, CoreError> {
+    start(
+        state,
+        CompactionRequest::agent(turn_id, iterations, extra_instructions),
+    )
+}
+
 fn start(
     state: &mut HarnessState,
     request: CompactionRequest<'_>,
@@ -302,6 +316,27 @@ fn request_too_long_warning(
 mod tests {
     use super::*;
     use crate::core::testing::*;
+
+    #[test]
+    fn an_agent_compaction_resumes_the_turn_it_compacted() {
+        let mut state = started();
+        let active = state.require_active().unwrap();
+        let (turn_id, iterations) = (active.turn_id.clone(), active.iterations);
+
+        let start = start_agent_compaction(&mut state, &turn_id, iterations, "keep going").unwrap();
+
+        let CompactionStartResolution::Pending(pending) = start else {
+            panic!("a context this small still compacts away");
+        };
+        assert_eq!(
+            pending.trigger(),
+            crate::core::features::compaction::CompactionTrigger::Agent
+        );
+        assert_eq!(
+            pending.in_turn_identity(),
+            Some((turn_id.as_str(), iterations))
+        );
+    }
 
     fn refuse_as_too_long(state: HarnessState) -> Step {
         let action_id = awaiting_action_id(&state);

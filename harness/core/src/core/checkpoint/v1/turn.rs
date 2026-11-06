@@ -294,12 +294,15 @@ impl CheckpointCompactionProjection {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq)]
 enum CheckpointCompactionTrigger {
     #[serde(rename = "manual")]
     Manual,
+    #[default]
     #[serde(rename = "automatic")]
     Automatic,
+    #[serde(rename = "agent")]
+    Agent,
 }
 
 impl CheckpointCompactionTrigger {
@@ -307,6 +310,7 @@ impl CheckpointCompactionTrigger {
         match trigger {
             CompactionTrigger::Manual => Self::Manual,
             CompactionTrigger::Automatic => Self::Automatic,
+            CompactionTrigger::Agent => Self::Agent,
         }
     }
 
@@ -314,6 +318,7 @@ impl CheckpointCompactionTrigger {
         match self {
             Self::Manual => CompactionTrigger::Manual,
             Self::Automatic => CompactionTrigger::Automatic,
+            Self::Agent => CompactionTrigger::Agent,
         }
     }
 }
@@ -327,6 +332,10 @@ enum CheckpointActivePhase {
     },
     AwaitingCompaction {
         compaction_id: String,
+        /// Retained for V1 compatibility: a checkpoint written before agent
+        /// compaction restores as the automatic compaction it was.
+        #[serde(default)]
+        trigger: CheckpointCompactionTrigger,
         projection: CheckpointCompactionProjection,
     },
     AwaitingToolBatch {
@@ -357,6 +366,7 @@ impl CheckpointActivePhase {
                 validate_identity(pending.compaction_id(), "compaction ID")?;
                 Ok(Self::AwaitingCompaction {
                     compaction_id: pending.compaction_id().to_string(),
+                    trigger: CheckpointCompactionTrigger::capture(pending.trigger()),
                     projection: CheckpointCompactionProjection::capture(pending.projection())?,
                 })
             }
@@ -382,12 +392,14 @@ impl CheckpointActivePhase {
             }
             Self::AwaitingCompaction {
                 compaction_id,
+                trigger,
                 projection,
             } => Ok(ActivePhase::AwaitingCompaction {
                 pending: PendingCompaction::in_turn(
                     compaction_id,
                     turn_id.to_string(),
                     iterations,
+                    trigger.restore(),
                     projection.restore(compaction)?,
                 ),
             }),
