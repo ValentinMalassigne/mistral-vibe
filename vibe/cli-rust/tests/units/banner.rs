@@ -105,7 +105,7 @@ fn every_cat_keeps_the_text_at_column_14() {
             "{model}"
         );
         let info: String = text(&banner, &config)[1].chars().skip(14).collect();
-        assert!(info.starts_with("Mistral Vibe"), "{model}: {info}");
+        assert!(info.starts_with("Mistral Vibe-Fork"), "{model}: {info}");
     }
 }
 

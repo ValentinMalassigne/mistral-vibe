@@ -16,7 +16,7 @@ handshake = {
 }
 screen_contains = ("mistral-large-3[medium]",)
 expected_clipboard = (
-    "Mistral Vibe v0.0.0-eval\nmistral-large-3[medium]\nType /help for more information"
+    "Mistral Vibe-Fork v0.0.0-eval\nmistral-large-3[medium]\nType /help for more information"
 )
 
 # Settle a banner frame with Shift+Tab, then copy the whole banner.

@@ -73,7 +73,7 @@ impl Banner {
         .join(" · ");
         let info = [
             Line::from(vec![
-                Span::styled("Mistral Vibe", brand),
+                Span::styled("Mistral Vibe-Fork", brand),
                 Span::styled(format!(" v{}", config.server_version), meta),
             ]),
             Line::from(Span::styled(model, meta)),

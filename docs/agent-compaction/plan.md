@@ -632,6 +632,12 @@ the `apply_tool_batch_transition` hook and `CompactionContinuation`, which are a
 The `vibe-fork` entry in `[project.scripts]` is a **fork-only** convenience: remove it if you
 open an upstream PR, since it only exists to let the two commands coexist.
 
+The banner in `vibe/cli-rust/src/ui/banner/mod.rs` reads `Mistral Vibe-Fork` for the same
+reason: it tells the two installed commands apart at a glance. Revert it, and the scenarios
+that assert its text (`client-e2e/scenarios/banner/lechonk.py`,
+`text_selection/banner_selection.py`, `conversation/subagent_view_empty.py`) with the goldens
+they own, before an upstream PR.
+
 ## 9. Estimate
 
 | Step | Volume |

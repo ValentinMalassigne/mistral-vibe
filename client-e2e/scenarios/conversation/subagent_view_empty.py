@@ -28,7 +28,7 @@ request_methods = frozenset({"session/read"})
 
 screen_contains = (
     # The banner stays mounted while a child view is open.
-    "Mistral Vibe",
+    "Mistral Vibe-Fork",
     "Type /help",
     "No transcript yet.",
     "Viewing Explore 1 · read-only · Esc to return",
