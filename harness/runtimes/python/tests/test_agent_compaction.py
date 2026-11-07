@@ -81,8 +81,13 @@ def test_an_empty_note_is_refused_before_anything_is_compacted(
     assert "Nothing was compacted" in result["error"]["message"]
 
 
-def test_a_path_outside_the_workspace_is_refused(tmp_path: Path) -> None:
-    outside = Path("/etc/hosts")
+def test_a_path_outside_the_workspace_is_refused(
+    tmp_path: Path, tmp_path_factory: pytest.TempPathFactory
+) -> None:
+    # A real file, in a directory that is nobody's root: the refusal under test
+    # is the boundary, not a missing file.
+    outside = tmp_path_factory.mktemp("outside") / "handoff.md"
+    outside.write_text("Finish step 3.\n")
 
     result = run(workspace(tmp_path), str(outside))
 
